@@ -43,11 +43,11 @@ extern IOSurfaceRef IOSurfaceCreate(CFDictionaryRef properties);
 extern void        *IOSurfaceGetBaseAddress(IOSurfaceRef buffer);
 extern size_t       IOSurfaceGetBytesPerRow(IOSurfaceRef buffer);
 
-// 属性键的实际字符串值，用 CFSTR 直接构造，不依赖头文件里的 extern 常量
-static CFStringRef DshKeyWidth(void)      { return CFSTR("IOSurfaceWidth"); }
-static CFStringRef DshKeyHeight(void)     { return CFSTR("IOSurfaceHeight"); }
-static CFStringRef DshKeyBytesPerElem(void){ return CFSTR("IOSurfaceBytesPerElement"); }
-static CFStringRef DshKeyPixelFormat(void){ return CFSTR("IOSurfacePixelFormat"); }
+// 属性键用 NSString 字面量，不依赖私有头里的 extern 常量
+static NSString *DshKeyWidth(void)        { return @"IOSurfaceWidth"; }
+static NSString *DshKeyHeight(void)       { return @"IOSurfaceHeight"; }
+static NSString *DshKeyBytesPerElem(void) { return @"IOSurfaceBytesPerElement"; }
+static NSString *DshKeyPixelFormat(void)  { return @"IOSurfacePixelFormat"; }
 
 #pragma mark - 日志
 
@@ -134,10 +134,10 @@ static UIImage *DshRenderServerImage(void) {
     size_t h = (size_t)llround(pts.height * scale);
 
     NSDictionary *props = @{
-        (__bridge NSString *)DshKeyWidth():        @(w),
-        (__bridge NSString *)DshKeyHeight():       @(h),
-        (__bridge NSString *)DshKeyBytesPerElem(): @(4),
-        (__bridge NSString *)DshKeyPixelFormat():  @((uint32_t)0x42475241),  // 'BGRA'
+        DshKeyWidth():        @(w),
+        DshKeyHeight():       @(h),
+        DshKeyBytesPerElem(): @(4),
+        DshKeyPixelFormat():  @((uint32_t)0x42475241),  // 'BGRA'
     };
 
     IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
@@ -146,7 +146,7 @@ static UIImage *DshRenderServerImage(void) {
         return nil;
     }
 
-    int rc = renderFn(0, CFSTR("LCD"), surf);
+    int rc = renderFn(0, (__bridge CFStringRef)@"LCD", surf);
     if (rc != 0) {
         DshLog(@"[renderserver] render rc=%d", rc);
         CFRelease(surf);
