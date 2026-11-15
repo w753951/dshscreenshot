@@ -50,12 +50,16 @@ jobs:
           mkdir -p out
           for ARCH in arm64 arm64e; do
             echo "=== $ARCH ==="
+            EXTRA=""
+            if [ "$ARCH" = "arm64e" ]; then
+              EXTRA="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps -fptrauth-vtable-pointer-address-discrimination -fptrauth-vtable-pointer-type-discrimination"
+            fi
             clang -target ${ARCH}-apple-ios14.0 \
               -isysroot "$SDK" \
               -fuse-ld=lld \
               -dynamiclib \
               -fobjc-arc -O2 \
-              -fblocks \
+              -fblocks $EXTRA \
               -DNDEBUG \
               -framework Foundation -framework UIKit \
               -framework CoreGraphics -framework IOSurface \
