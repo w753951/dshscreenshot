@@ -11,8 +11,16 @@
 
 int main(int argc, char **argv) {
     @autoreleasepool {
-        void *h = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
-        fprintf(stderr, "SpringBoardServices handle=%p err=%s\n", h, h ? "-" : dlerror());
+        const char *libs[] = {
+            "/System/Library/PrivateFrameworks/ScreenshotServices.framework/ScreenshotServices",
+            "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+            "/System/Library/PrivateFrameworks/SpringBoardUIServices.framework/SpringBoardUIServices",
+            NULL
+        };
+        for (int i = 0; libs[i]; i++) {
+            void *hh = dlopen(libs[i], RTLD_LAZY);
+            fprintf(stderr, "dlopen %s -> %p\n", libs[i], hh);
+        }
 
         Class mgrCls = objc_getClass("SBScreenshotManager");
         fprintf(stderr, "SBScreenshotManager=%p\n", (__bridge void *)mgrCls);
