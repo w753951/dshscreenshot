@@ -66,45 +66,66 @@ jobs:
           done
           ls -la out/
 
-      - name: Lipo (manual fat assembly)
+      - name: Force arm64e cpusubtype + fat assemble
         run: |
           set -e
           A=out/DshScreenshotService.arm64.dylib
           E=out/DshScreenshotService.arm64e.dylib
           ls -la $A $E
-          echo "arm64  cpu:"; od -An -tx4 -N 12 $A
-          echo "arm64e cpu:"; od -An -tx4 -N 12 $E
-          node -e '
-            const fs=require("fs");
-            const a=fs.readFileSync("out/DshScreenshotService.arm64.dylib");
-            const e=fs.readFileSync("out/DshScreenshotService.arm64e.dylib");
-            const ALIGN=0x4000;
-            const pad=(n)=>(ALIGN-(n%ALIGN))%ALIGN;
-            const hdrLen=8+2*20;
-            const offA=hdrLen+pad(hdrLen);
-            const offE=offA+a.length+pad(a.length);
-            const total=offE+e.length;
-            const buf=Buffer.alloc(total);
-            buf.writeUInt32BE(0xcafebabe,0);
-            buf.writeUInt32BE(2,4);
-            // arch 0: arm64  cputype=0x0100000c subtype=0
-            buf.writeUInt32BE(0x0100000c,8);
-            buf.writeUInt32BE(0,12);
-            buf.writeUInt32BE(offA,16);
-            buf.writeUInt32BE(a.length,20);
-            buf.writeUInt32BE(14,24);
-            // arch 1: arm64e cputype=0x0100000c subtype=0x80000002
-            buf.writeUInt32BE(0x0100000c,28);
-            buf.writeUInt32BE(0x80000002,32);
-            buf.writeUInt32BE(offE,36);
-            buf.writeUInt32BE(e.length,40);
-            buf.writeUInt32BE(14,44);
-            a.copy(buf,offA);
-            e.copy(buf,offE);
-            fs.writeFileSync("out/DshScreenshotService.dylib",buf);
-            console.log("fat built", total, "bytes; offA="+offA+" offE="+offE);
-          '
+
+          echo "--- before ---"
+          echo -n "arm64  : "; od -An -tx4 -N 12 $A
+          echo -n "arm64e : "; od -An -tx4 -N 12 $E
+
+          # arm64e slice 的 cputype/subtype 在 offset 4..11
+          CPU_E=$(od -An -tu4 -j4 -N4 $E | tr -d ' ')
+          SUB_E=$(od -An -tu4 -j8 -N4 $E | tr -d ' ')
+          echo "arm64e slice: cputype=$CPU_E subtype=$SUB_E"
+          if [ "$CPU_E" != "16777228" ]; then
+            echo "ERROR: arm64e slice cputype is not arm64 (0x0100000c)"; exit 1
+          fi
+          if [ "$SUB_E" != "2147483650" ]; then
+            echo "rewriting subtype -> 0x80000002 (arm64e ptrauth ABI)"
+            printf '\x02\x00\x00\x80' | dd of=$E bs=1 seek=8 conv=notrunc 2>/dev/null
+          fi
+
+          echo "--- after ---"
+          echo -n "arm64e : "; od -An -tx4 -N 12 $E
+
+          # 用 llvm-lipo 拼装（此时两 slice cputype 相同但 subtype 不同，lipo 应能区分）
+          LIPO=/usr/lib/llvm-19/bin/llvm-lipo
+          [ -x "$LIPO" ] || LIPO=/usr/bin/llvm-lipo
+          echo "lipo: $LIPO"
+          if $LIPO -create $A $E -output out/DshScreenshotService.dylib 2>lipo.err; then
+            echo "llvm-lipo OK"
+          else
+            echo "llvm-lipo failed:"; cat lipo.err
+            echo "=== fallback: node fat assembler ==="
+            node -e '
+              const fs=require("fs");
+              const a=fs.readFileSync("out/DshScreenshotService.arm64.dylib");
+              const e=fs.readFileSync("out/DshScreenshotService.arm64e.dylib");
+              const AL=0x4000, pad=n=>(AL-(n%AL))%AL;
+              const hdr=48;
+              const offA=hdr+pad(hdr);
+              const offE=offA+a.length+pad(a.length);
+              const buf=Buffer.alloc(offE+e.length);
+              buf.writeUInt32BE(0xcafebabe,0); buf.writeUInt32BE(2,4);
+              buf.writeUInt32BE(0x0100000c,8);  buf.writeUInt32BE(0,12);
+              buf.writeUInt32BE(offA,16);       buf.writeUInt32BE(a.length,20);
+              buf.writeUInt32BE(14,24);
+              buf.writeUInt32BE(0x0100000c,28); buf.writeUInt32BE(0x80000002,32);
+              buf.writeUInt32BE(offE,36);       buf.writeUInt32BE(e.length,40);
+              buf.writeUInt32BE(14,44);
+              a.copy(buf,offA); e.copy(buf,offE);
+              fs.writeFileSync("out/DshScreenshotService.dylib",buf);
+              console.log("node fat:",buf.length,"bytes offA="+offA,"offE="+offE);
+            '
+          fi
+
+          echo "=== final header ==="
           od -An -tx4 -N 52 out/DshScreenshotService.dylib
+          ls -la out/DshScreenshotService.dylib
 
       - uses: actions/upload-artifact@v4
         with:
