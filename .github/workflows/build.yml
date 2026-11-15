@@ -58,6 +58,8 @@ jobs:
               -framework CoreGraphics -framework IOSurface \
               -framework ImageIO -framework QuartzCore \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib \
+              -Wl,-platform_version,ios,14.0,15.6 \
+              -Wl,-arch,$ARCH \
               -o out/DshScreenshotService.$ARCH.dylib \
               src/DshScreenshotService.m
             echo "$ARCH OK"
