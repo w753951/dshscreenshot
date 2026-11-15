@@ -1,0 +1,65 @@
+name: Build dshss tool
+
+on:
+  push:
+    paths:
+      - 'src/sstool/**'
+      - '.github/workflows/build-sstool.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 19
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget gnupg zip
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm19.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-19 lld-19 llvm-19
+
+      - name: Fetch iOS SDK
+        run: |
+          set -e
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+          echo "SDK_ROOT=$PWD/sdks-master" >> $GITHUB_ENV
+
+      - name: Compile dshss
+        run: |
+          set -e
+          SDK="$SDK_ROOT/iPhoneOS15.6.sdk"
+          [ -d "$SDK" ] || SDK=$(ls -d $SDK_ROOT/iPhoneOS*.sdk | tail -1)
+          mkdir -p out
+          CLANG=/usr/lib/llvm-19/bin/clang
+          LLD=/usr/lib/llvm-19/bin/ld64.lld
+          for ARCH in arm64 arm64e; do
+            EXTRA=""
+            [ "$ARCH" = "arm64e" ] && EXTRA="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
+            $CLANG -target ${ARCH}-apple-ios14.0 -isysroot "$SDK" -fuse-ld="$LLD" \
+              -fobjc-arc -O2 -fblocks $EXTRA -DNDEBUG \
+              -framework Foundation \
+              -Wl,-platform_version,ios,14.0,15.6 \
+              -Wl,-arch,$ARCH \
+              -o out/dshss.$ARCH \
+              src/sstool/dshss.m
+            echo "$ARCH OK"
+          done
+          ls -la out/
+          E=out/dshss.arm64e
+          SUB=$(od -An -tu4 -j8 -N4 $E | tr -d ' ')
+          if [ "$SUB" != "2147483650" ]; then
+            printf '\x02\x00\x00\x80' | dd of=$E bs=1 seek=8 conv=notrunc 2>/dev/null
+          fi
+          od -An -tx4 -N 12 out/dshss.arm64e
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dshss
+          path: out/
+          retention-days: 7
