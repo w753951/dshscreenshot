@@ -69,13 +69,19 @@ jobs:
       - name: Lipo
         run: |
           set -e
-          if [ -f out/DshScreenshotService.arm64.dylib ] && [ -f out/DshScreenshotService.arm64e.dylib ]; then
-            llvm-lipo-14 -create out/DshScreenshotService.arm64.dylib out/DshScreenshotService.arm64e.dylib -output out/DshScreenshotService.dylib 2>/dev/null || \
-            llvm-lipo -create out/DshScreenshotService.arm64.dylib out/DshScreenshotService.arm64e.dylib -output out/DshScreenshotService.dylib
-          else
-            cp out/DshScreenshotService.arm64.dylib out/DshScreenshotService.dylib
+          LIPO=$(ls /usr/bin/llvm-lipo* /usr/lib/llvm-*/bin/llvm-lipo 2>/dev/null | head -1 || true)
+          echo "lipo: ${LIPO:-none}"
+          A64=out/DshScreenshotService.arm64.dylib
+          A64E=out/DshScreenshotService.arm64e.dylib
+          if [ -n "$LIPO" ] && [ -f "$A64" ] && [ -f "$A64E" ]; then
+            $LIPO -create "$A64" "$A64E" -output out/DshScreenshotService.dylib && echo "fat ok"
           fi
-          file out/DshScreenshotService.dylib
+          if [ ! -f out/DshScreenshotService.dylib ]; then
+            if [ -f "$A64E" ]; then cp "$A64E" out/DshScreenshotService.dylib; echo "fallback arm64e thin";
+            else cp "$A64" out/DshScreenshotService.dylib; echo "fallback arm64 thin"; fi
+          fi
+          file out/DshScreenshotService.dylib || true
+          ls -la out/
 
       - name: Package
         run: |
@@ -89,6 +95,6 @@ jobs:
         with:
           name: DshScreenshotService
           path: |
-            out/DshScreenshotService.dylib
+            out/
             DshScreenshotService.zip
           retention-days: 7
