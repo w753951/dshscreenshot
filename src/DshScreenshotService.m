@@ -36,6 +36,8 @@ static NSString *const kDshLogPath = @"/var/mobile/dsh-screen-plugin.log";
 static NSString *const kDshKey     = @"dsh-go-screen-v1";
 
 
+static void DshLog(NSString *fmt, ...);
+
 // ---- IOSurface 私有 API 自声明（theos SDK 不含该头文件）----
 typedef struct __IOSurface *IOSurfaceRef;
 
