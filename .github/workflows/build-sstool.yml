@@ -43,7 +43,8 @@ jobs:
             [ "$ARCH" = "arm64e" ] && EXTRA="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
             $CLANG -target ${ARCH}-apple-ios14.0 -isysroot "$SDK" -fuse-ld="$LLD" \
               -fobjc-arc -O2 -fblocks $EXTRA -DNDEBUG \
-              -framework Foundation \
+              -framework Foundation -framework UIKit \
+              -framework CoreGraphics -framework ImageIO -framework QuartzCore \
               -Wl,-platform_version,ios,14.0,15.6 \
               -Wl,-arch,$ARCH \
               -o out/dshss.$ARCH \
