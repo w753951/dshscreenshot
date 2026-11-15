@@ -16,6 +16,7 @@ jobs:
           set -e
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld llvm libplist-utils
+          clang --version; ld64.lld --version 2>/dev/null || lld --version 2>/dev/null || true
           wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
           unzip -q sdks.zip
           ls sdks-master | head
@@ -52,7 +53,7 @@ jobs:
             echo "=== $ARCH ==="
             EXTRA=""
             if [ "$ARCH" = "arm64e" ]; then
-              EXTRA="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps -fptrauth-vtable-pointer-address-discrimination -fptrauth-vtable-pointer-type-discrimination"
+              EXTRA="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
             fi
             clang -target ${ARCH}-apple-ios14.0 \
               -isysroot "$SDK" \
@@ -61,6 +62,7 @@ jobs:
               -fobjc-arc -O2 \
               -fblocks $EXTRA \
               -fno-constant-cfstrings \
+              -fno-objc-constant-string-objects \
               -DNDEBUG \
               -framework Foundation -framework UIKit \
               -framework CoreGraphics -framework IOSurface \
