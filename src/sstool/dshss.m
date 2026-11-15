@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "SpringBoardServices handle=%p err=%s\n", h, h ? "-" : dlerror());
 
         Class mgrCls = objc_getClass("SBScreenshotManager");
-        fprintf(stderr, "SBScreenshotManager=%p\n", (void *)mgrCls);
+        fprintf(stderr, "SBScreenshotManager=%p\n", (__bridge void *)mgrCls);
         if (!mgrCls) { return 2; }
 
         unsigned int n = 0;
@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
 
         id mgr = ((id (*)(id, SEL))objc_msgSend)((id)mgrCls, sel_registerName("new"));
         if (!mgr) mgr = ((id (*)(id, SEL))objc_msgSend)((id)mgrCls, sel_registerName("sharedInstance"));
-        fprintf(stderr, "manager=%p\n", (void *)mgr);
+        fprintf(stderr, "manager=%p\n", (__bridge void *)mgr);
         if (!mgr) return 3;
 
         SEL selSave = sel_registerName("saveScreenshots");
