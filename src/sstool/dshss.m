@@ -9,9 +9,13 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <unistd.h>
-#import <IOSurface/IOSurface.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+
+typedef struct __IOSurface *IOSurfaceRef;
+extern IOSurfaceRef IOSurfaceCreate(CFDictionaryRef);
+extern void        *IOSurfaceGetBaseAddress(IOSurfaceRef);
+extern size_t       IOSurfaceGetBytesPerRow(IOSurfaceRef);
 
 typedef int (*CARenderServerRenderDisplayFn)(uint32_t, CFStringRef, IOSurfaceRef);
 
