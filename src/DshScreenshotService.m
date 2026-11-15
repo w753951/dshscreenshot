@@ -39,9 +39,35 @@ static NSString *const kDshKey     = @"dsh-go-screen-v1";
 // ---- IOSurface 私有 API 自声明（theos SDK 不含该头文件）----
 typedef struct __IOSurface *IOSurfaceRef;
 
-extern IOSurfaceRef IOSurfaceCreate(CFDictionaryRef properties);
-extern void        *IOSurfaceGetBaseAddress(IOSurfaceRef buffer);
-extern size_t       IOSurfaceGetBytesPerRow(IOSurfaceRef buffer);
+typedef IOSurfaceRef (*IOSurfaceCreateFn)(CFDictionaryRef);
+typedef void        *(*IOSurfaceGetBaseAddressFn)(IOSurfaceRef);
+typedef size_t       (*IOSurfaceGetBytesPerRowFn)(IOSurfaceRef);
+
+static IOSurfaceCreateFn          DshIOSurfaceCreate(void) {
+    static IOSurfaceCreateFn f; static dispatch_once_t o;
+    dispatch_once(&o, ^{
+        void *h = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
+        f = (IOSurfaceCreateFn)dlsym(h ? h : RTLD_DEFAULT, "IOSurfaceCreate");
+        DshLog(@"[iosurface] create=%p", (void *)f);
+    });
+    return f;
+}
+static IOSurfaceGetBaseAddressFn  DshIOSurfaceBase(void) {
+    static IOSurfaceGetBaseAddressFn f; static dispatch_once_t o;
+    dispatch_once(&o, ^{
+        void *h = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
+        f = (IOSurfaceGetBaseAddressFn)dlsym(h ? h : RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+    });
+    return f;
+}
+static IOSurfaceGetBytesPerRowFn  DshIOSurfaceBPR(void) {
+    static IOSurfaceGetBytesPerRowFn f; static dispatch_once_t o;
+    dispatch_once(&o, ^{
+        void *h = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
+        f = (IOSurfaceGetBytesPerRowFn)dlsym(h ? h : RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+    });
+    return f;
+}
 
 // 属性键用 NSString 字面量，不依赖私有头里的 extern 常量
 static NSString *DshKeyWidth(void)        { return @"IOSurfaceWidth"; }
@@ -140,7 +166,8 @@ static UIImage *DshRenderServerImage(void) {
         DshKeyPixelFormat():  @((uint32_t)0x42475241),  // 'BGRA'
     };
 
-    IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+    IOSurfaceCreateFn crt = DshIOSurfaceCreate();
+    IOSurfaceRef surf = crt ? crt((__bridge CFDictionaryRef)props) : NULL;
     if (!surf) {
         DshLog(@"[renderserver] IOSurfaceCreate failed w=%zu h=%zu", w, h);
         return nil;
@@ -155,8 +182,8 @@ static UIImage *DshRenderServerImage(void) {
 
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(
-        IOSurfaceGetBaseAddress(surf), w, h, 8,
-        IOSurfaceGetBytesPerRow(surf), cs,
+        DshIOSurfaceBase() ? DshIOSurfaceBase()(surf) : NULL, w, h, 8,
+        DshIOSurfaceBPR() ? DshIOSurfaceBPR()(surf) : 0, cs,
         kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
     CGColorSpaceRelease(cs);
 
