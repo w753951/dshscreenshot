@@ -1,0 +1,72 @@
+name: Build DshScreenshotService
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode / SDK
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Fetch ldid
+        run: |
+          brew install ldid || true
+          which ldid || ls -la /opt/homebrew/bin/ldid
+
+      - name: Compile arm64 + arm64e
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p out
+          for ARCH in arm64 arm64e; do
+            echo "=== building $ARCH ==="
+            xcrun --sdk iphoneos clang \
+              -arch $ARCH \
+              -isysroot "$SDK" \
+              -miphoneos-version-min=14.0 \
+              -dynamiclib \
+              -fobjc-arc \
+              -O2 \
+              -framework Foundation \
+              -framework UIKit \
+              -framework CoreGraphics \
+              -framework IOSurface \
+              -framework ImageIO \
+              -framework QuartzCore \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib \
+              -o out/DshScreenshotService.$ARCH.dylib \
+              src/DshScreenshotService.m
+          done
+          lipo -create \
+            out/DshScreenshotService.arm64.dylib \
+            out/DshScreenshotService.arm64e.dylib \
+            -output out/DshScreenshotService.dylib
+          lipo -info out/DshScreenshotService.dylib
+
+      - name: Sign with entitlements
+        run: |
+          ldid -Ssrc/entitlements.plist out/DshScreenshotService.dylib
+          ldid -h out/DshScreenshotService.dylib | head -20
+
+      - name: Package
+        run: |
+          mkdir -p pkg/Library/MobileSubstrate/DynamicLibraries
+          cp out/DshScreenshotService.dylib pkg/Library/MobileSubstrate/DynamicLibraries/
+          cp src/DshScreenshotService.plist pkg/Library/MobileSubstrate/DynamicLibraries/
+          cd pkg && zip -r ../DshScreenshotService.zip . && cd ..
+          ls -la DshScreenshotService.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DshScreenshotService
+          path: |
+            out/DshScreenshotService.dylib
+            DshScreenshotService.zip
