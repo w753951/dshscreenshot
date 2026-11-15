@@ -24,14 +24,6 @@ jobs:
           ld64.lld-19 --version || true
           ls /usr/lib/llvm-19/bin/ | grep -i -E "lld|lipo" || true
 
-      - name: Get ldid (prebuilt)
-        run: |
-          set -e
-          wget -q https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64 -O ldid_bin
-          chmod +x ldid_bin
-          ./ldid_bin -h 2>&1 | head -3 || true
-          echo "ldid ready"
-
       - name: Fetch iOS SDK
         run: |
           set -e
@@ -79,17 +71,6 @@ jobs:
           set -e
           A=out/DshScreenshotService.arm64.dylib
           E=out/DshScreenshotService.arm64e.dylib
-          # 关键：各 slice 先 adhoc 签名，否则没有 LC_CODE_SIGNATURE，libhooker 不收
-          if command -v ldid >/dev/null 2>&1; then
-            ldid -S src/entitlements.plist $A && echo "signed arm64"
-            ldid -S src/entitlements.plist $E && echo "signed arm64e"
-          elif [ -x ./ldid_bin ]; then
-            ./ldid_bin -S src/entitlements.plist $A
-            ./ldid_bin -S src/entitlements.plist $E
-            echo "signed with ldid_bin"
-          else
-            echo "NO LDID - slices will be unsigned"
-          fi
           ls -la $A $E
           echo "arm64  cpu:"; od -An -tx4 -N 12 $A
           echo "arm64e cpu:"; od -An -tx4 -N 12 $E
