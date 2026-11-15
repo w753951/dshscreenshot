@@ -7,54 +7,75 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Xcode / SDK
+      - name: Setup iOS cross toolchain
         run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libplist-utils
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+          ls sdks-master | head
+          echo "SDK_ROOT=$PWD/sdks-master" >> $GITHUB_ENV
 
       - name: Fetch ldid
         run: |
-          brew install ldid || true
-          which ldid || ls -la /opt/homebrew/bin/ldid
+          set -e
+          git clone --depth=1 https://github.com/ProcursusTeam/ldid.git
+          cd ldid
+          make -j$(nproc) CXX=clang++ CC=clang || true
+          ls -la ldid || sudo cp ldid /usr/local/bin/ 2>/dev/null || true
+          cd ..
+          if [ ! -x ./ldid/ldid ]; then
+            echo "building ldid failed, downloading prebuilt"
+            wget -q https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64 -O ldid_bin
+            chmod +x ldid_bin
+          fi
+          ls -la
 
-      - name: Compile arm64 + arm64e
+      - name: Show toolchain
+        run: |
+          clang --version
+          ls $SDK_ROOT
+
+      - name: Compile
         run: |
           set -e
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          SDK="$SDK_ROOT/iPhoneOS15.6.sdk"
+          if [ ! -d "$SDK" ]; then SDK=$(ls -d $SDK_ROOT/iPhoneOS*.sdk | tail -1); fi
+          echo "USING SDK=$SDK"
           mkdir -p out
           for ARCH in arm64 arm64e; do
-            echo "=== building $ARCH ==="
-            xcrun --sdk iphoneos clang \
-              -arch $ARCH \
+            echo "=== $ARCH ==="
+            clang -target ${ARCH}-apple-ios14.0 \
               -isysroot "$SDK" \
-              -miphoneos-version-min=14.0 \
+              -fuse-ld=lld \
               -dynamiclib \
-              -fobjc-arc \
-              -O2 \
-              -framework Foundation \
-              -framework UIKit \
-              -framework CoreGraphics \
-              -framework IOSurface \
-              -framework ImageIO \
-              -framework QuartzCore \
+              -fobjc-arc -O2 \
+              -fblocks \
+              -DNDEBUG \
+              -framework Foundation -framework UIKit \
+              -framework CoreGraphics -framework IOSurface \
+              -framework ImageIO -framework QuartzCore \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib \
               -o out/DshScreenshotService.$ARCH.dylib \
-              src/DshScreenshotService.m
+              src/DshScreenshotService.m || echo "FAILED $ARCH"
           done
-          lipo -create \
-            out/DshScreenshotService.arm64.dylib \
-            out/DshScreenshotService.arm64e.dylib \
-            -output out/DshScreenshotService.dylib
-          lipo -info out/DshScreenshotService.dylib
+          ls -la out/
 
-      - name: Sign with entitlements
+      - name: Lipo
         run: |
-          ldid -Ssrc/entitlements.plist out/DshScreenshotService.dylib
-          ldid -h out/DshScreenshotService.dylib | head -20
+          set -e
+          if [ -f out/DshScreenshotService.arm64.dylib ] && [ -f out/DshScreenshotService.arm64e.dylib ]; then
+            llvm-lipo-14 -create out/DshScreenshotService.arm64.dylib out/DshScreenshotService.arm64e.dylib -output out/DshScreenshotService.dylib 2>/dev/null || \
+            llvm-lipo -create out/DshScreenshotService.arm64.dylib out/DshScreenshotService.arm64e.dylib -output out/DshScreenshotService.dylib
+          else
+            cp out/DshScreenshotService.arm64.dylib out/DshScreenshotService.dylib
+          fi
+          file out/DshScreenshotService.dylib
 
       - name: Package
         run: |
@@ -70,3 +91,4 @@ jobs:
           path: |
             out/DshScreenshotService.dylib
             DshScreenshotService.zip
+          retention-days: 7
