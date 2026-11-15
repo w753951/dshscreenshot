@@ -60,6 +60,7 @@ jobs:
               -dynamiclib \
               -fobjc-arc -O2 \
               -fblocks $EXTRA \
+              -fno-constant-cfstrings \
               -DNDEBUG \
               -framework Foundation -framework UIKit \
               -framework CoreGraphics -framework IOSurface \
