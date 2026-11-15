@@ -38,7 +38,6 @@ static NSString *const kDshKey     = @"dsh-go-screen-v1";
 
 // ---- IOSurface 私有 API 自声明（theos SDK 不含该头文件）----
 typedef struct __IOSurface *IOSurfaceRef;
-typedef CFStringRef IOSurfacePropertyKey;
 
 extern IOSurfaceRef IOSurfaceCreate(CFDictionaryRef properties);
 extern void        *IOSurfaceGetBaseAddress(IOSurfaceRef buffer);
@@ -171,7 +170,7 @@ static UIImage *DshRenderServerImage(void) {
         CGContextRelease(ctx);
     }
     CFRelease(surf);
-    DshLog(@"[renderserver] ok w=%zu h=%zu image=%p", w, h, (void *)out);
+    DshLog(@"[renderserver] ok w=%zu h=%zu image=%p", w, h, (__bridge void *)out);
     return out;
 }
 
@@ -182,16 +181,16 @@ static UIImage *DshSnapshotImage(void) {
     id screen = ((id (*)(id, SEL))objc_msgSend)(UIScreenCls, @selector(mainScreen));
     if (!screen) return nil;
 
-    UIView *view = ((id (*)(id, SEL))objc_msgSend)(screen,
-                                                   @selector(snapshotViewAfterScreenUpdates:),
-                                                   (BOOL)YES);
+    UIView *view = ((id (*)(id, SEL, BOOL))objc_msgSend)(screen,
+                                                        @selector(snapshotViewAfterScreenUpdates:),
+                                                        YES);
     if (!view) return nil;
 
     UIGraphicsBeginImageContextWithOptions(view.bounds.size, NO, 0);
     [view drawViewHierarchyInRect:view.bounds afterScreenUpdates:YES];
     UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
-    DshLog(@"[snapshot] image=%p", (void *)img);
+    DshLog(@"[snapshot] image=%p", (__bridge void *)img);
     return img;
 }
 
