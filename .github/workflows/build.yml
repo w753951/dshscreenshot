@@ -55,8 +55,7 @@ jobs:
               -fobjc-arc -O2 -fblocks $EXTRA \
               -DNDEBUG \
               -framework Foundation -framework UIKit \
-              -framework CoreGraphics -framework IOSurface \
-              -framework ImageIO -framework QuartzCore \
+              -framework CoreGraphics -framework QuartzCore \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshScreenshotService.dylib \
               -Wl,-platform_version,ios,14.0,15.6 \
               -Wl,-arch,$ARCH \
