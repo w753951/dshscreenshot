@@ -44,7 +44,7 @@ jobs:
             $CLANG -target ${ARCH}-apple-ios14.0 -isysroot "$SDK" -fuse-ld="$LLD" \
               -fobjc-arc -O2 -fblocks $EXTRA -DNDEBUG \
               -framework Foundation -framework UIKit \
-              -framework CoreGraphics -framework ImageIO -framework QuartzCore \
+              -framework CoreGraphics -framework ImageIO -framework QuartzCore -framework IOSurface \
               -Wl,-platform_version,ios,14.0,15.6 \
               -Wl,-arch,$ARCH \
               -o out/dshss.$ARCH \
