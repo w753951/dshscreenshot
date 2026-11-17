@@ -1,0 +1,71 @@
+name: Build probe with cctools-port ld64 (real arm64e)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git make autoconf automake libtool \
+            clang llvm-dev libssl-dev libxml2-dev pkg-config zlib1g-dev \
+            libncurses5-dev wget unzip build-essential
+
+      - name: Build cctools-port ld64
+        run: |
+          set -e
+          git clone --depth=1 https://github.com/tpoechtrager/cctools-port.git
+          cd cctools-port/cctools
+          ./autogen.sh
+          ./configure --prefix=/usr/local --target=x86_64-apple-darwin \
+            --with-llvm-config=$(command -v llvm-config) \
+            --enable-ld64 --disable-ld64-plugin --disable-lto
+          make -j$(nproc) ld64-ld 2>&1 | tail -20 || make -j$(nproc) 2>&1 | tail -20
+          ls -la ld64-ld* 2>/dev/null || true
+          sudo make install 2>&1 | tail -5 || true
+          ls -la /usr/local/bin/ | grep -iE 'ld64|lip' || true
+
+      - name: Show ld64
+        run: |
+          which ld64-ld64 ld64 ld-wrapper 2>/dev/null || true
+          ls /usr/local/bin/
+
+      - name: Fetch iOS SDK
+        run: |
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+          echo "SDK_ROOT=$PWD/sdks-master" >> $GITHUB_ENV
+
+      - name: Compile real arm64e with ld64
+        run: |
+          set -e
+          SDK="$SDK_ROOT/iPhoneOS15.6.sdk"
+          [ -d "$SDK" ] || SDK=$(ls -d $SDK_ROOT/iPhoneOS*.sdk | tail -1)
+          LD64=$(ls /usr/local/bin/ld64-ld64 2>/dev/null || ls /usr/local/bin/ld64 2>/dev/null || echo "")
+          echo "LD64=$LD64"
+          mkdir -p out
+          CLANG=/usr/lib/llvm-19/bin/clang
+          [ -x "$CLANG" ] || CLANG=$(command -v clang)
+          for ARCH in arm64 arm64e; do
+            X=""
+            [ "$ARCH" = "arm64e" ] && X="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
+            $CLANG -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
+              -fuse-ld="$LD64" -dynamiclib -O2 -fblocks $X -DNDEBUG \
+              -framework Foundation \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshMin.dylib \
+              -o out/DshMin.$ARCH.dylib src/probe/probe.m || echo "FAIL $ARCH"
+          done
+          ls -la out/
+          for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-ld64
+          path: out/
+          retention-days: 7
