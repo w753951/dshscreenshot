@@ -173,7 +173,7 @@ static unsigned char *capture_png(size_t *outLen) {
 
     // 方案 B：IOMobileFramebuffer 直接拿主屏 surface
     void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-    void *imf   = dlopen("/System/Library/Frameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
+    void *imf   = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
     lg("[cap] iokit=%p imf=%p", iokit, imf);
 
     unsigned (*fb_open)(void) = iokit ? dlsym(iokit, "IOMobileFramebufferOpen") : NULL;
