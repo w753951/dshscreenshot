@@ -338,6 +338,84 @@ static NSString *dsh_tap_row(long sec, long row) {
     return out;
 }
 
+#pragma mark - 按文本直接找行（不依赖坐标、不依赖行号）
+
+/* 列出所有可见行里文本匹配的行：每行 "序号|section:row|文本" */
+static NSString *dsh_find_rows(NSString *needle) {
+    __block NSString *out = @"";
+    onMain(^{
+        NSMutableString *s = [NSMutableString string];
+        int idx = 0;
+        for (id tv in dsh_all_tables()) {
+            if ([tv isKindOfClass:[UITableView class]]) {
+                UITableView *t = (UITableView *)tv;
+                for (UITableViewCell *c in t.visibleCells) {
+                    NSString *txt = dsh_cell_text(c);
+                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    [s appendFormat:@"%d|%ld:%ld|%@\n", idx++, (long)ip.section, (long)ip.row, txt];
+                }
+            } else {
+                UICollectionView *t = (UICollectionView *)tv;
+                for (UICollectionViewCell *c in t.visibleCells) {
+                    NSString *txt = dsh_cell_text(c);
+                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    [s appendFormat:@"%d|%ld:%ld|%@\n", idx++, (long)ip.section, (long)ip.item, txt];
+                }
+            }
+        }
+        out = s.length ? s : @"(none)";
+    });
+    return out;
+}
+
+/* 点第 skip 个文本匹配的行：直接对该 cell 走 delegate，绕开坐标和列表刷新 */
+static NSString *dsh_tap_text(NSString *needle, int skip) {
+    __block NSString *out = @"not-found";
+    onMain(^{
+        int idx = 0;
+        for (id tv in dsh_all_tables()) {
+            if ([tv isKindOfClass:[UITableView class]]) {
+                UITableView *t = (UITableView *)tv;
+                for (UITableViewCell *c in t.visibleCells) {
+                    NSString *txt = dsh_cell_text(c);
+                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    if (idx++ < skip) continue;
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    CGRect r = [c convertRect:c.bounds toView:nil];
+                    dsh_dot(CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)));
+                    [t selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+                    id<UITableViewDelegate> dg = t.delegate;
+                    if ([dg respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                        [dg tableView:t didSelectRowAtIndexPath:ip];
+                    }
+                    out = [NSString stringWithFormat:@"table-row:%@", txt];
+                    return;
+                }
+            } else {
+                UICollectionView *t = (UICollectionView *)tv;
+                for (UICollectionViewCell *c in t.visibleCells) {
+                    NSString *txt = dsh_cell_text(c);
+                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    if (idx++ < skip) continue;
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    CGRect r = [c convertRect:c.bounds toView:nil];
+                    dsh_dot(CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)));
+                    [t selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+                    id<UICollectionViewDelegate> dg = t.delegate;
+                    if ([dg respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                        [dg collectionView:t didSelectItemAtIndexPath:ip];
+                    }
+                    out = [NSString stringWithFormat:@"collection-item:%@", txt];
+                    return;
+                }
+            }
+        }
+    });
+    return out;
+}
+
 #pragma mark - 滚动
 
 static UIScrollView *dsh_top_scroll(void) {
@@ -642,6 +720,10 @@ static void handle(int fd) {
         res = dsh_scroll_to([NSString stringWithUTF8String:qstr(buf, "text")], dy > 0 ? -dy : dy, 12);
     } else if (strstr(buf, "GET /scroll")) {
         res = dsh_scroll(qnum(buf, "dy", 600));
+    } else if (strstr(buf, "GET /find")) {
+        res = dsh_find_rows([NSString stringWithUTF8String:qstr(buf, "text")]);
+    } else if (strstr(buf, "GET /tap_text")) {
+        res = dsh_tap_text([NSString stringWithUTF8String:qstr(buf, "text")], (int)qnum(buf, "skip", 0));
     } else if (strstr(buf, "GET /tap_row")) {
         long s = (long)qnum(buf, "s", 0), r = (long)qnum(buf, "r", 0);
         res = dsh_tap_row(s, r);
