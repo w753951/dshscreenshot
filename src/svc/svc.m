@@ -223,17 +223,20 @@ static void touch_init(void) {
     xRegisterCb  = (void *)iofind("IOHIDEventSystemClientRegisterEventCallback");
     xScheduleRL  = (void *)iofind("IOHIDEventSystemClientScheduleWithRunLoop");
     if (!xCreate || !xDispatch) { lg("[touch] no symbols"); return; }
+    /* 两个 client：一个只监听（拿 senderID），一个只发送（注入事件） */
     gHid = xCreate(kCFAllocatorDefault);
+    HIDClient mon = xCreate(kCFAllocatorDefault);
     if (gHid && xSetProp) xSetProp(gHid, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+    if (mon && xSetProp)  xSetProp(mon,  CFSTR("AllowInstrumentation"), kCFBooleanTrue);
     lg("[touch] client=%p finger=%p digit=%p dispatch=%p append=%p sid=%p",
        (void *)gHid, (void *)xFinger, (void *)xDigitizer, (void *)xDispatch, (void *)xAppend, xGetSenderID);
 
-    /* 注册事件回调，从真实触摸里拿 senderID，并挂到主 runloop */
-    if (xRegisterCb && xScheduleRL && gHid) {
-        ((int (*)(void *, void *, void *, void *))xRegisterCb)(gHid, (void *)sender_cb, NULL, NULL);
-        ((void (*)(void *, void *, void *))xScheduleRL)(gHid, (void *)CFRunLoopGetMain(),
+    /* 只把 monitor client 挂到 runloop 收触摸；发送用另一个 client */
+    if (xRegisterCb && xScheduleRL && mon) {
+        ((int (*)(void *, void *, void *, void *))xRegisterCb)(mon, (void *)sender_cb, NULL, NULL);
+        ((void (*)(void *, void *, void *))xScheduleRL)(mon, (void *)CFRunLoopGetMain(),
                                                         (void *)kCFRunLoopDefaultMode);
-        lg("[touch] sender-id callback registered");
+        lg("[touch] sender-id callback registered on monitor client %p", (void *)mon);
     }
 }
 
