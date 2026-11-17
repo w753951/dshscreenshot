@@ -1,16 +1,21 @@
-// probe.m —— 最小注入验证
-// 只写一行日志，不依赖任何框架（连 Foundation 都不 import）
-#include <stdio.h>
-#include <unistd.h>
-#include <time.h>
+// probe.m —— 最小注入验证（结构对齐 DshProbe2：ObjC + Foundation）
+#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
 __attribute__((constructor))
 static void dsh_probe_init(void) {
-    FILE *f = fopen("/var/mobile/dsh-min.log", "a");
-    if (!f) return;
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    fprintf(f, "%02d:%02d:%02d constructor uid=%d pid=%d\n",
-            tm->tm_hour, tm->tm_min, tm->tm_sec, getuid(), getpid());
-    fclose(f);
+    @autoreleasepool {
+        NSString *msg = [NSString stringWithFormat:
+            @"loaded uid=%d pid=%d bundle=%@",
+            getuid(), getpid(),
+            [[NSBundle mainBundle] bundleIdentifier]];
+
+        NSString *path = @"/var/mobile/dsh-min.log";
+        NSString *old = [NSString stringWithContentsOfFile:path
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:NULL];
+        NSString *merged = [(old ?: @"") stringByAppendingFormat:@"%@\n", msg];
+        [merged writeToFile:path atomically:YES
+                   encoding:NSUTF8StringEncoding error:NULL];
+    }
 }
