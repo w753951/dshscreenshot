@@ -37,7 +37,7 @@ jobs:
           mkdir -p out
           C=/usr/lib/llvm-19/bin/clang
           L=/usr/lib/llvm-19/bin/ld64.lld
-          for ARCH in arm64 arm64e; do
+          for ARCH in arm64; do
             X=""
             [ "$ARCH" = "arm64e" ] && X="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
             $C -target ${ARCH}-apple-ios14.0 -isysroot "$SDK" -fuse-ld="$L" \
