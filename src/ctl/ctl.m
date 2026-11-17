@@ -65,6 +65,10 @@ static void (*pSetProp)(IOHIDEventSystemClientRef, CFStringRef, CFTypeRef);
 static void (*pDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
 static void (*pAppend)(IOHIDEventRef, IOHIDEventRef);
 static IOHIDEventRef (*pKey)(CFAllocatorRef, DshTime, uint32_t usage, Boolean down, CFOptionFlags opts);
+static void (*pSetInt)(IOHIDEventRef, uint32_t field, CFIndex value);
+static IOHIDEventSystemClientRef (*pCreateType)(CFAllocatorRef, int type, void *err);
+
+static int gMode = 0;   /* 注入模式，见 do_tap */
 
 static void *find(const char *n) {
     static const char *libs[] = {
@@ -89,10 +93,23 @@ static int init_hid(void) {
     pDispatch  = (void *)find("IOHIDEventSystemClientDispatchEvent");
     pAppend    = (void *)find("IOHIDEventAppendEvent");
     pKey       = (void *)find("IOHIDEventCreateKeyboardEvent");
+    pSetInt    = (void *)find("IOHIDEventSetIntegerValue");
+    pCreateType= (void *)find("IOHIDEventSystemClientCreateWithType");
     if (!pCreate || !pDispatch || (!pFinger && !pDigitizer)) return 0;
     gClient = pCreate(kCFAllocatorDefault);
+    if (!gClient && pCreateType) gClient = pCreateType(kCFAllocatorDefault, 0, NULL);
     if (!gClient) return 0;
     if (pSetProp) pSetProp(gClient, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+    return 1;
+}
+
+/* 模式 4/5/6/7：换成 Admin/Monitor 等其它 client type */
+static int reclient(int type) {
+    if (!pCreateType) return 0;
+    IOHIDEventSystemClientRef c = pCreateType(kCFAllocatorDefault, type, NULL);
+    if (!c) return 0;
+    if (pSetProp) pSetProp(c, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+    gClient = c;
     return 1;
 }
 
@@ -114,13 +131,29 @@ static void send_touch(int phase, double x, double y, uint32_t ident) {
                             (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
     if (!finger) return;
 
+    /* 模式 1/3/4/5/6：补 display-integrated 标记，否则 SpringBoard 认为坐标不在显示层上 */
+    if ((gMode & 1) && pSetInt) pSetInt(finger, 0x000B0007 /* kIOHIDEventFieldDigitizerIsDisplayIntegrated */, 1);
+
+    /* 模式 6（bit2）：不套 hand，直接发 finger */
+    if (gMode & 2) { pDispatch(gClient, finger); return; }
+
     if (pDigitizer && pAppend) {
         IOHIDEventRef hand = pDigitizer(kCFAllocatorDefault, ts, 3 /*hand*/, 0, ident,
                                         EV_RANGE | EV_TOUCH, 0,
                                         0.0f, 0.0f, 0.0f, 0.0f, 0.0f, range, 0, 0);
-        if (hand) { pAppend(hand, finger); pDispatch(gClient, hand); return; }
+        if (hand) {
+            if ((gMode & 1) && pSetInt) pSetInt(hand, 0x000B0007, 1);
+            pAppend(hand, finger);
+            pDispatch(gClient, hand);
+            return;
+        }
     }
     pDispatch(gClient, finger);
+}
+
+static void set_mode(int m) {
+    gMode = m;
+    if (m >= 4 && m <= 6) reclient(m - 3);   /* 4->type1 5->type2 6->type3 */
 }
 
 static int do_tap(double x, double y, int ms) {
@@ -226,8 +259,9 @@ static void handle(int fd) {
     if (strstr(buf, "GET /tap")) {
         double x = q(buf, "x", 0), y = q(buf, "y", 0);
         int ms = (int)q(buf, "ms", 80);
+        set_mode((int)q(buf, "mode", 0));
         int rc = do_tap(x, y, ms);
-        snprintf(body, sizeof(body), "tap %.0f,%.0f rc=%d", x, y, rc);
+        snprintf(body, sizeof(body), "tap %.0f,%.0f mode=%d rc=%d", x, y, gMode, rc);
     } else if (strstr(buf, "GET /swipe")) {
         int rc = do_swipe(q(buf, "x1", 0), q(buf, "y1", 0), q(buf, "x2", 0), q(buf, "y2", 0), (int)q(buf, "ms", 300));
         snprintf(body, sizeof(body), "swipe rc=%d", rc);
@@ -288,7 +322,8 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[1], "tap") && argc >= 4) {
         int ms = argc >= 5 ? atoi(argv[4]) : 80;
-        printf("tap rc=%d\n", do_tap(atof(argv[2]), atof(argv[3]), ms));
+        set_mode(argc >= 6 ? atoi(argv[5]) : 0);
+        printf("tap mode=%d rc=%d\n", gMode, do_tap(atof(argv[2]), atof(argv[3]), ms));
         return 0;
     }
     if (!strcmp(argv[1], "swipe") && argc >= 6) {
