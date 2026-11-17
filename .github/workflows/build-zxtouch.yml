@@ -53,7 +53,7 @@ jobs:
           export PATH="$HOME/tc/ios-arm64e-clang-toolchain/bin:$PATH"
           export THEOS_PACKAGE_SCHEME=rootless
           cd src/pccontrol
-          make package FINALPACKAGE=1 2>&1 | grep -viE "warning|note:" | tail -60
+          make package FINALPACKAGE=1 SDKVERSION=14.5 TARGET=iphone:clang:14.5:15.0 2>&1 | grep -viE "warning|note:" | tail -60
           echo "=== debs ==="
           find . -name "*.deb" -maxdepth 4 | tee /tmp/debs.txt
           test -s /tmp/debs.txt
