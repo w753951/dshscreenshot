@@ -56,6 +56,16 @@ static void onMain(void (^blk)(void)) {
 #pragma mark - window
 
 static UIWindow *dsh_window(void) {
+    /* 键盘弹出时 keyWindow 会变成键盘窗口（高度只有 300 多），先取「最高的非键盘窗口」 */
+    {
+        UIWindow *big = nil;
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (w.hidden || w.alpha < 0.01) continue;
+            if (w.bounds.size.height < 700) continue;
+            if (!big || w.bounds.size.height > big.bounds.size.height) big = w;
+        }
+        if (big) return big;
+    }
     UIApplication *app = [UIApplication sharedApplication];
     for (UIWindow *w in app.windows) {
         if (w.isKeyWindow && !w.isHidden && w.alpha > 0.01) return w;
