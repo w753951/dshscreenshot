@@ -59,6 +59,10 @@ static CFDictRef (*f_dictCreate)(const void*, const void**, const void**, long, 
 static void (*f_dictSet)(CFDictRef, const void*, const void*);
 static const void *kDictKeyCB;
 
+static int (*f_dispCount)(void);
+static CFStringRef (*f_dispName)(long);
+static int (*f_strGetCString)(CFStringRef, char*, long, unsigned);
+
 static void *(*f_imgDestCreate)(CFDataRef, CFStringRef, unsigned long, const void*);
 static void (*f_imgDestAdd)(void*, CGImageRef, const void*);
 static int (*f_imgDestFinal)(void*);
@@ -74,7 +78,12 @@ static void load_syms(void) {
 
     lg("[sym] qc=%p is=%p cg=%p cf=%p io=%p", qc, is, cg, cf, io);
 
-    if (qc) f_renderDisplay = dlsym(qc, "CARenderServerRenderDisplay");
+    if (qc) {
+        f_renderDisplay = dlsym(qc, "CARenderServerRenderDisplay");
+        f_dispCount     = dlsym(qc, "CARenderServerGetDisplayCount");
+        f_dispName      = dlsym(qc, "CARenderServerCopyDisplayName");
+        lg("[sym] dispCount=%p dispName=%p", (void*)f_dispCount, (void*)f_dispName);
+    }
     if (is) {
         f_surfaceCreate = dlsym(is, "IOSurfaceCreate");
         f_surfaceBase   = dlsym(is, "IOSurfaceGetBaseAddress");
@@ -96,6 +105,7 @@ static void load_syms(void) {
         f_dataLen           = dlsym(cf, "CFDataGetLength");
         f_cfRelease         = dlsym(cf, "CFRelease");
         f_strCreate         = dlsym(cf, "CFStringCreateWithCString");
+        f_strGetCString     = dlsym(cf, "CFStringGetCString");
         f_numCreate         = dlsym(cf, "CFNumberCreate");
         f_dictCreate        = dlsym(cf, "CFDictionaryCreate");
         f_dictSet           = dlsym(cf, "CFDictionarySetValue");
@@ -160,6 +170,17 @@ static unsigned char *capture_png(size_t *outLen) {
     size_t bpr0 = f_surfaceBPR(surf);
     void *base0 = f_surfaceBase(surf);
     lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
+
+    if (f_dispCount) {
+        int cnt = f_dispCount();
+        lg("[cap] display count=%d", cnt);
+        for (int i = 0; i < cnt && i < 6; i++) {
+            CFStringRef nm = f_dispName ? f_dispName(i) : NULL;
+            char nb[128] = {0};
+            if (nm && f_strGetCString) f_strGetCString(nm, nb, sizeof(nb)-1, 0x08000100);
+            lg("[cap] display[%d] name='%s'", i, nb);
+        }
+    } else lg("[cap] no dispCount symbol");
 
     CFStringRef lcd = f_strCreate(NULL, "LCD", 0x08000100);
     f_renderDisplay(1, lcd, surf);
