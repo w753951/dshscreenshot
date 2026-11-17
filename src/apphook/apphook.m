@@ -131,25 +131,27 @@ static BOOL dsh_fire_gesture_tree(UIView *root, int maxDepth) {
 
 #pragma mark - 点击位置可视化
 
-static UIWindow *gDotWin = nil;
-
-/* 在目标位置闪一个半透明红圈，0.9 秒消失 */
+/* 在目标位置闪一个半透明红圈，0.9 秒消失。
+   注意：不要再建独立 UIWindow（会抢 key window，微信里容易黑屏/崩），
+   直接挂到当前 key window 的最上层。 */
 static void dsh_show_dot(CGPoint p) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!gDotWin) {
-            gDotWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            gDotWin.windowLevel = 10000001.0;
-            gDotWin.userInteractionEnabled = NO;
-            gDotWin.backgroundColor = [UIColor clearColor];
+        UIWindow *win = nil;
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (w.isKeyWindow) { win = w; break; }
         }
+        if (!win) win = [UIApplication sharedApplication].windows.firstObject;
+        if (!win) return;
+        [[win viewWithTag:0xD5D0] removeFromSuperview];
         CGFloat R = 20.0;
         UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(p.x - R, p.y - R, R * 2, R * 2)];
+        dot.tag = 0xD5D0;
+        dot.userInteractionEnabled = NO;
         dot.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.55];
         dot.layer.cornerRadius = R;
         dot.layer.borderWidth = 2.0;
         dot.layer.borderColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.9].CGColor;
-        [gDotWin addSubview:dot];
-        gDotWin.hidden = NO;
+        [win addSubview:dot];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             [dot removeFromSuperview];
@@ -368,6 +370,104 @@ static NSString *dsh_tap_row(long sec, long row) {
     return out;
 }
 
+/* 取字符串参数（支持 %XX 解码） */
+static const char *qstr(const char *req, const char *name) {
+    static __thread char buf[768];
+    char pat[32]; snprintf(pat, sizeof(pat), "%s=", name);
+    const char *p = strstr(req, pat);
+    if (!p) { buf[0] = 0; return buf; }
+    p += strlen(pat);
+    size_t i = 0;
+    while (*p && *p != '&' && *p != ' ' && i + 1 < sizeof(buf)) {
+        if (*p == '%' && p[1] && p[2]) {
+            char h[3] = { p[1], p[2], 0 };
+            buf[i++] = (char)strtol(h, NULL, 16);
+            p += 3;
+        } else {
+            buf[i++] = *p++;
+        }
+    }
+    buf[i] = 0;
+    return buf;
+}
+
+/* 当前可编辑的输入框（优先 firstResponder） */
+static UIView *dsh_find_input(void) {
+    UIView *any = nil;
+    NSMutableArray *stack = [NSMutableArray array];
+    for (UIWindow *w in [UIApplication sharedApplication].windows) [stack addObject:w];
+    int g = 0;
+    while (stack.count && g++ < 4000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if (v.hidden || v.alpha < 0.02) continue;
+        if ([v isKindOfClass:[UITextView class]] && ((UITextView *)v).editable) {
+            if (v.isFirstResponder) return v;
+            if (!any) any = v;
+        } else if ([v isKindOfClass:[UITextField class]] && ((UITextField *)v).enabled) {
+            if (v.isFirstResponder) return v;
+            if (!any) any = v;
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+    return any;
+}
+
+/* 直接往输入框写文字：设 text + 发变更通知，不碰键盘、不走 HID */
+static NSString *dsh_type(NSString *text) {
+    __block NSString *out = @"no-input";
+    void (^work)(void) = ^{
+        UIView *in = dsh_find_input();
+        if (!in) return;
+        [in becomeFirstResponder];
+        if ([in isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)in;
+            tv.text = text;
+            [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification object:tv];
+            if ([tv.delegate respondsToSelector:@selector(textViewDidChange:)]) [tv.delegate textViewDidChange:tv];
+        } else {
+            UITextField *tf = (UITextField *)in;
+            tf.text = text;
+            [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+        }
+        out = [NSString stringWithFormat:@"typed:%@:%@", NSStringFromClass([in class]), text];
+        lg(@"type -> %@", out);
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+    return out;
+}
+
+/* 按标题触发 UIButton（发送 / 粘贴 / 切换到文字键盘等） */
+static NSString *dsh_press(NSString *title) {
+    __block NSString *out = @"no-button";
+    void (^work)(void) = ^{
+        NSMutableArray *stack = [NSMutableArray array];
+        for (UIWindow *w in [UIApplication sharedApplication].windows) [stack addObject:w];
+        int g = 0;
+        while (stack.count && g++ < 6000) {
+            UIView *v = stack.lastObject;
+            [stack removeLastObject];
+            if (v.hidden || v.alpha < 0.02) continue;
+            if ([v isKindOfClass:[UIButton class]]) {
+                UIButton *b = (UIButton *)v;
+                NSString *t = [b titleForState:UIControlStateNormal];
+                if (!t.length) t = b.currentTitle;
+                if (t.length && [t isEqualToString:title]) {
+                    [b sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    out = [NSString stringWithFormat:@"pressed:%@:%@", t, NSStringFromClass([b class])];
+                    lg(@"press -> %@", out);
+                    return;
+                }
+            }
+            [stack addObjectsFromArray:v.subviews];
+        }
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+    return out;
+}
+
 static void handle(int fd) {
     char buf[1536];
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -383,6 +483,12 @@ static void handle(int fd) {
         long s = (long)qnum(buf, "s", 0), r = (long)qnum(buf, "r", 0);
         NSString *res = dsh_tap_row(s, r);
         snprintf(out, sizeof(out), "%s", [res UTF8String]);
+    } else if (strstr(buf, "GET /type")) {
+        NSString *r = dsh_type([NSString stringWithUTF8String:qstr(buf, "text")]);
+        snprintf(out, sizeof(out), "%s", [r UTF8String]);
+    } else if (strstr(buf, "GET /press")) {
+        NSString *r = dsh_press([NSString stringWithUTF8String:qstr(buf, "title")]);
+        snprintf(out, sizeof(out), "%s", [r UTF8String]);
     } else if (strstr(buf, "GET /tap")) {
         NSString *r = dsh_tap(qnum(buf, "x", 0.5), qnum(buf, "y", 0.5));
         snprintf(out, sizeof(out), "%s", [r UTF8String]);
