@@ -32,8 +32,14 @@ jobs:
         run: |
           TC=$HOME/tc/ios-arm64e-clang-toolchain
           CLANG=$TC/bin/clang
-          SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
-          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
+          echo "--- available SDKs ---"
+          ls $PWD/sdks-master | head -20
+          # clang-10 的 ld 不认新版 !tapi-tbd，优先用老 SDK
+          SDK=""
+          for v in 13.7 13.6 13.5 12.4 12.2 11.4 11.2; do
+            [ -d "$PWD/sdks-master/iPhoneOS${v}.sdk" ] && SDK="$PWD/sdks-master/iPhoneOS${v}.sdk" && break
+          done
+          [ -z "$SDK" ] && SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | sort -V | head -1)
           echo "SDK=$SDK"
           mkdir -p out
           for ARCH in arm64 arm64e; do
