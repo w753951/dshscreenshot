@@ -1,5 +1,11 @@
-// svc.m —— SpringBoard 截图服务（真 arm64e，纯 C + dlopen 私有 API）
+// svc.m —— SpringBoard 截图服务（真 arm64e）
 // GET http://127.0.0.1:47191/capture?key=dsh-go-screen-v1 -> image/png
+//
+// 设计要点：
+//  1) constructor 只写日志 + 起线程，全部重活放线程里（并延时 8s 等 SpringBoard 启动完成）
+//  2) 私有 API 全部 dlsym 运行时解析，任一缺失都不崩
+//  3) 截图走 CARenderServerRenderDisplay；IOSurface 必须带 IOSurfaceIsGlobal 才能被渲染
+//  4) PNG 编码走 ImageIO 的 CGImageDestination（纯 CF API，不用 ObjC）
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,10 +14,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
-
 #include <dlfcn.h>
-#include <dirent.h>
-#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -22,7 +25,6 @@ typedef struct CGContext *CGContextRef;
 typedef struct CGImage *CGImageRef;
 typedef struct CGColorSpace *CGColorSpaceRef;
 typedef struct __CFDictionary *CFDictRef;
-typedef struct __CFNumber *CFNumberRef;
 typedef struct __CFData *CFDataRef;
 typedef struct __CFString *CFStringRef;
 
@@ -37,38 +39,33 @@ static void lg(const char *fmt, ...) {
     fputc('\n', f); fclose(f);
 }
 
-// ---- 符号 ----
-static int (*f_renderDisplay)(unsigned, CFStringRef, IOSurfaceRef);
-static IOSurfaceRef (*f_surfaceCreate)(CFDictRef);
-static void *(*f_surfaceBase)(IOSurfaceRef);
-static size_t (*f_surfaceBPR)(IOSurfaceRef);
-static size_t (*f_surfaceW)(IOSurfaceRef);
-static size_t (*f_surfaceH)(IOSurfaceRef);
+/* ---------- 符号 ---------- */
+static int (*f_render)(unsigned, CFStringRef, IOSurfaceRef);
+static IOSurfaceRef (*f_surfCreate)(CFDictRef);
+static void *(*f_surfBase)(IOSurfaceRef);
+static size_t (*f_surfBPR)(IOSurfaceRef);
+static size_t (*f_surfW)(IOSurfaceRef);
+static size_t (*f_surfH)(IOSurfaceRef);
 
-static CGColorSpaceRef (*f_csDeviceRGB)(void);
+static CGColorSpaceRef (*f_csRGB)(void);
 static void (*f_csRelease)(CGColorSpaceRef);
-static CGContextRef (*f_bitmapCtxCreate)(void*, size_t, size_t, size_t, size_t, CGColorSpaceRef, unsigned);
-static CGImageRef (*f_ctxCreateImage)(CGContextRef);
+static CGContextRef (*f_bmpCtx)(void*, size_t, size_t, size_t, size_t, CGColorSpaceRef, unsigned);
+static CGImageRef (*f_ctxImage)(CGContextRef);
 static void (*f_ctxRelease)(CGContextRef);
 static void (*f_imgRelease)(CGImageRef);
 
-static CFDataRef (*f_dataCreateMutable)(const void*, long);
+static CFDataRef (*f_dataNew)(const void*, long);
 static const void *(*f_dataBytes)(CFDataRef);
 static long (*f_dataLen)(CFDataRef);
 static void (*f_cfRelease)(const void*);
-static CFStringRef (*f_strCreate)(const void*, const char*, unsigned);
-static CFNumberRef (*f_numCreate)(const void*, long, const void*);
-static CFDictRef (*f_dictCreate)(const void*, const void**, const void**, long, const void*, const void*);
-static void (*f_dictSet)(CFDictRef, const void*, const void*);
-static const void *kDictKeyCB;
+static CFStringRef (*f_str)(const void*, const char*, unsigned);
+static CFRef (*f_num)(const void*, long, const void*);
+static CFDictRef (*f_dict)(const void*, const void**, const void**, long, const void*, const void*);
+static const void *kCb;
 
-static int (*f_dispCount)(void);
-static CFStringRef (*f_dispName)(long);
-static int (*f_strGetCString)(CFStringRef, char*, long, unsigned);
-
-static void *(*f_imgDestCreate)(CFDataRef, CFStringRef, unsigned long, const void*);
-static void (*f_imgDestAdd)(void*, CGImageRef, const void*);
-static int (*f_imgDestFinal)(void*);
+static void *(*f_destNew)(CFDataRef, CFStringRef, unsigned long, const void*);
+static void (*f_destAdd)(void*, CGImageRef, const void*);
+static int (*f_destFinal)(void*);
 
 static int g_ready = 0;
 
@@ -78,55 +75,45 @@ static void load_syms(void) {
     void *cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
     void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
     void *io = dlopen("/System/Library/Frameworks/ImageIO.framework/ImageIO", RTLD_LAZY);
-
     lg("[sym] qc=%p is=%p cg=%p cf=%p io=%p", qc, is, cg, cf, io);
 
-    if (qc) {
-        f_renderDisplay = dlsym(qc, "CARenderServerRenderDisplay");
-        f_dispCount     = dlsym(qc, "CARenderServerGetDisplayCount");
-        f_dispName      = dlsym(qc, "CARenderServerCopyDisplayName");
-        lg("[sym] dispCount=%p dispName=%p", (void*)f_dispCount, (void*)f_dispName);
-    }
+    if (qc) f_render = dlsym(qc, "CARenderServerRenderDisplay");
     if (is) {
-        f_surfaceCreate = dlsym(is, "IOSurfaceCreate");
-        f_surfaceBase   = dlsym(is, "IOSurfaceGetBaseAddress");
-        f_surfaceBPR    = dlsym(is, "IOSurfaceGetBytesPerRow");
-        f_surfaceW      = dlsym(is, "IOSurfaceGetWidth");
-        f_surfaceH      = dlsym(is, "IOSurfaceGetHeight");
+        f_surfCreate = dlsym(is, "IOSurfaceCreate");
+        f_surfBase   = dlsym(is, "IOSurfaceGetBaseAddress");
+        f_surfBPR    = dlsym(is, "IOSurfaceGetBytesPerRow");
+        f_surfW      = dlsym(is, "IOSurfaceGetWidth");
+        f_surfH      = dlsym(is, "IOSurfaceGetHeight");
     }
     if (cg) {
-        f_csDeviceRGB     = dlsym(cg, "CGColorSpaceCreateDeviceRGB");
-        f_csRelease       = dlsym(cg, "CGColorSpaceRelease");
-        f_bitmapCtxCreate = dlsym(cg, "CGBitmapContextCreate");
-        f_ctxCreateImage  = dlsym(cg, "CGBitmapContextCreateImage");
-        f_ctxRelease      = dlsym(cg, "CGContextRelease");
-        f_imgRelease      = dlsym(cg, "CGImageRelease");
+        f_csRGB      = dlsym(cg, "CGColorSpaceCreateDeviceRGB");
+        f_csRelease  = dlsym(cg, "CGColorSpaceRelease");
+        f_bmpCtx     = dlsym(cg, "CGBitmapContextCreate");
+        f_ctxImage   = dlsym(cg, "CGBitmapContextCreateImage");
+        f_ctxRelease = dlsym(cg, "CGContextRelease");
+        f_imgRelease = dlsym(cg, "CGImageRelease");
     }
     if (cf) {
-        f_dataCreateMutable = dlsym(cf, "CFDataCreateMutable");
-        f_dataBytes         = dlsym(cf, "CFDataGetBytePtr");
-        f_dataLen           = dlsym(cf, "CFDataGetLength");
-        f_cfRelease         = dlsym(cf, "CFRelease");
-        f_strCreate         = dlsym(cf, "CFStringCreateWithCString");
-        f_strGetCString     = dlsym(cf, "CFStringGetCString");
-        f_numCreate         = dlsym(cf, "CFNumberCreate");
-        f_dictCreate        = dlsym(cf, "CFDictionaryCreate");
-        f_dictSet           = dlsym(cf, "CFDictionarySetValue");
-        kDictKeyCB          = (const void *)dlsym(cf, "kCFTypeDictionaryKeyCallBacks");
+        f_dataNew   = dlsym(cf, "CFDataCreateMutable");
+        f_dataBytes = dlsym(cf, "CFDataGetBytePtr");
+        f_dataLen   = dlsym(cf, "CFDataGetLength");
+        f_cfRelease = dlsym(cf, "CFRelease");
+        f_str       = dlsym(cf, "CFStringCreateWithCString");
+        f_num       = dlsym(cf, "CFNumberCreate");
+        f_dict      = dlsym(cf, "CFDictionaryCreate");
+        kCb         = (const void *)dlsym(cf, "kCFTypeDictionaryKeyCallBacks");
     }
     if (io) {
-        f_imgDestCreate = dlsym(io, "CGImageDestinationCreateWithData");
-        f_imgDestAdd    = dlsym(io, "CGImageDestinationAddImage");
-        f_imgDestFinal  = dlsym(io, "CGImageDestinationFinalize");
+        f_destNew   = dlsym(io, "CGImageDestinationCreateWithData");
+        f_destAdd   = dlsym(io, "CGImageDestinationAddImage");
+        f_destFinal = dlsym(io, "CGImageDestinationFinalize");
     }
-
-    g_ready = f_renderDisplay && f_surfaceCreate && f_surfaceBase && f_surfaceBPR &&
-              f_csDeviceRGB && f_bitmapCtxCreate && f_ctxCreateImage &&
-              f_dataCreateMutable && f_dataBytes && f_dataLen && f_strCreate &&
-              f_numCreate && f_dictCreate && kDictKeyCB &&
-              f_imgDestCreate && f_imgDestAdd && f_imgDestFinal;
-    lg("[sym] ready=%d render=%p surf=%p dest=%p", g_ready,
-       (void*)f_renderDisplay, (void*)f_surfaceCreate, (void*)f_imgDestCreate);
+    g_ready = f_render && f_surfCreate && f_surfBase && f_surfBPR &&
+              f_csRGB && f_bmpCtx && f_ctxImage && f_dataNew &&
+              f_dataBytes && f_dataLen && f_str && f_num && f_dict && kCb &&
+              f_destNew && f_destAdd && f_destFinal;
+    lg("[sym] ready=%d render=%p surfCreate=%p destNew=%p",
+       g_ready, (void*)f_render, (void*)f_surfCreate, (void*)f_destNew);
 }
 
 static void screen_size(size_t *w, size_t *h) {
@@ -135,190 +122,85 @@ static void screen_size(size_t *w, size_t *h) {
     if (f) { unsigned long a=0,b=0; if (fscanf(f,"%lu %lu",&a,&b)==2 && a&&b){*w=a;*h=b;} fclose(f); }
 }
 
-// 返回 PNG 数据（malloc 分配，调用方 free），失败返回 NULL
+/* 返回 PNG（malloc，调用方 free），失败 NULL */
 static unsigned char *capture_png(size_t *outLen) {
     *outLen = 0;
-    if (!g_ready) return NULL;
+    if (!g_ready) { lg("[cap] not ready"); return NULL; }
 
     size_t W, H; screen_size(&W, &H);
 
-    CFStringRef kWidth  = f_strCreate(NULL, "IOSurfaceWidth", 0x08000100);
-    CFStringRef kHeight = f_strCreate(NULL, "IOSurfaceHeight", 0x08000100);
-    CFStringRef kBytes  = f_strCreate(NULL, "IOSurfaceBytesPerElement", 0x08000100);
-    CFStringRef kFormat = f_strCreate(NULL, "IOSurfacePixelFormat", 0x08000100);
-    CFStringRef kRow    = f_strCreate(NULL, "IOSurfaceBytesPerRow", 0x08000100);
-    CFStringRef kAlloc  = f_strCreate(NULL, "IOSurfaceAllocSize", 0x08000100);
-    if (!kWidth||!kHeight||!kBytes||!kFormat) { lg("[cap] keystr fail"); return NULL; }
+    CFStringRef kW  = f_str(NULL, "IOSurfaceWidth", 0x08000100);
+    CFStringRef kH  = f_str(NULL, "IOSurfaceHeight", 0x08000100);
+    CFStringRef kB  = f_str(NULL, "IOSurfaceBytesPerElement", 0x08000100);
+    CFStringRef kF  = f_str(NULL, "IOSurfacePixelFormat", 0x08000100);
+    CFStringRef kR  = f_str(NULL, "IOSurfaceBytesPerRow", 0x08000100);
+    CFStringRef kG  = f_str(NULL, "IOSurfaceIsGlobal", 0x08000100);
+    if (!kW || !kH || !kB || !kF || !kR || !kG) { lg("[cap] key str fail"); return NULL; }
 
-    int32_t vw=(int32_t)W, vh=(int32_t)H, vb=4, vrow=(int32_t)(W*4);
-    uint32_t vf=0x42475241; /* 'BGRA' */
-    int32_t valloc=(int32_t)(W*H*4);
-    CFNumberRef nw = f_numCreate(NULL, 3, &vw);
-    CFNumberRef nh = f_numCreate(NULL, 3, &vh);
-    CFNumberRef nb = f_numCreate(NULL, 3, &vb);
-    CFNumberRef nf = f_numCreate(NULL, 3, &vf);
-    CFNumberRef nr = f_numCreate(NULL, 3, &vrow);
-    CFNumberRef na = f_numCreate(NULL, 3, &valloc);
+    int32_t vw=(int32_t)W, vh=(int32_t)H, vb=4, vr=(int32_t)(W*4), vg=1;
+    uint32_t vf=0x42475241;
+    CFRef nw=f_num(NULL,3,&vw), nh=f_num(NULL,3,&vh), nb=f_num(NULL,3,&vb);
+    CFRef nf=f_num(NULL,3,&vf), nr=f_num(NULL,3,&vr), ng=f_num(NULL,3,&vg);
 
-    const void *keys[6] = { kWidth, kHeight, kBytes, kFormat, kRow, kAlloc };
-    const void *vals[6] = { nw, nh, nb, nf, nr, na };
-    CFDictRef props = f_dictCreate(NULL, keys, vals, 6, kDictKeyCB, kDictKeyCB);
+    const void *keys[6] = { kW, kH, kB, kF, kR, kG };
+    const void *vals[6] = { nw, nh, nb, nf, nr, ng };
+    CFDictRef props = f_dict(NULL, keys, vals, 6, kCb, kCb);
     if (!props) { lg("[cap] dict fail"); return NULL; }
 
-    IOSurfaceRef surf = f_surfaceCreate(props);
-    if (!surf) { lg("[cap] IOSurfaceCreate fail %zux%zu", W, H); return NULL; }
+    IOSurfaceRef surf = f_surfCreate(props);
+    if (!surf) { lg("[cap] IOSurfaceCreate FAIL %zux%zu", W, H); return NULL; }
 
-    size_t bw0 = f_surfaceW ? f_surfaceW(surf) : 0;
-    size_t bh0 = f_surfaceH ? f_surfaceH(surf) : 0;
-    size_t bpr0 = f_surfaceBPR(surf);
-    void *base0 = f_surfaceBase(surf);
-    lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
+    size_t bw = f_surfW ? f_surfW(surf) : W;
+    size_t bh = f_surfH ? f_surfH(surf) : H;
+    size_t bpr = f_surfBPR(surf);
+    void *base = f_surfBase(surf);
+    lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw, bh, bpr, base);
 
-    // 方案 C：让 SpringBoard 自己截图（SBScreenShotter / SBScreenshotManager）
-    void *libobjc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
-    void *(*o_getClass)(const char*) = libobjc ? dlsym(libobjc, "objc_getClass") : NULL;
-    void *(*o_msgSend)(void*, void*, ...) = libobjc ? dlsym(libobjc, "objc_msgSend") : NULL;
-    void *(*o_sel)(const char*) = libobjc ? dlsym(libobjc, "sel_registerName") : NULL;
-    lg("[cap] objc getClass=%p msgSend=%p sel=%p", (void*)o_getClass, (void*)o_msgSend, (void*)o_sel);
-
-    const char *cls_names[] = { "SBScreenShotter", "SBScreenshotManager", "SBScreenFlash", NULL };
-    for (int i = 0; cls_names[i]; i++) {
-        void *c = o_getClass ? o_getClass(cls_names[i]) : NULL;
-        lg("[cap] class %s = %p", cls_names[i], c);
+    CFStringRef lcd = f_str(NULL, "LCD", 0x08000100);
+    unsigned ctxTry[2] = { 0u, 1u };
+    size_t nz = 0;
+    for (int i = 0; i < 2; i++) {
+        f_render(ctxTry[i], lcd, surf);
+        usleep(120000);
+        nz = 0;
+        const unsigned char *p = (const unsigned char *)base;
+        size_t tot = bpr * bh;
+        if (p) for (size_t k = 0; k < tot; k += 53) if (p[k]) nz++;
+        lg("[cap] ctx=%u sampled-nonzero=%zu", ctxTry[i], nz);
+        if (nz > 50) break;
     }
 
-    void *(*pGetMainQ)(void) = (void *(*)(void))dlsym(RTLD_DEFAULT, "dispatch_get_main_queue");
-    void (*pDispatchSync)(void*, void*) = (void (*)(void*, void*))dlsym(RTLD_DEFAULT, "dispatch_sync");
-    void *pMainQObj = (void *)dlsym(RTLD_DEFAULT, "_dispatch_main_q");
-    lg("[cap] getMainQ=%p dispatchSync=%p mainQObj=%p", (void*)pGetMainQ, (void*)pDispatchSync, pMainQObj);
+    if (nz <= 50) { lg("[cap] still blank"); f_cfRelease(surf); return NULL; }
 
-    void *mainQ = NULL;
-    if (pGetMainQ) mainQ = pGetMainQ();
-    if (!mainQ && pMainQObj) mainQ = pMainQObj;
+    CGColorSpaceRef cs = f_csRGB();
+    CGContextRef c = f_bmpCtx(base, bw, bh, 8, bpr, cs,
+        1 | (2 << 12));
+    f_csRelease(cs);
+    if (!c) { lg("[cap] ctx fail"); f_cfRelease(surf); return NULL; }
 
-    __block int triggered = 0;
-    if (mainQ && pDispatchSync) pDispatchSync(mainQ, ^{
-        // 方法存在性检查，避免发送未知 selector 导致崩溃
-        void *(*o_classGetClassMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getClassMethod") : NULL;
-        void *(*o_classGetInstMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getInstanceMethod") : NULL;
-        lg("[cap] classGetClassMethod=%p classGetInstMethod=%p", (void*)o_classGetClassMethod, (void*)o_classGetInstMethod);
+    CGImageRef ci = f_ctxImage(c);
+    f_ctxRelease(c);
+    if (!ci) { lg("[cap] image fail"); f_cfRelease(surf); return NULL; }
 
-        // 枚举所有含 Screen/Shot/Capture 的类
-    int (*o_getClassList)(void**, int) = libobjc ? dlsym(libobjc, "objc_getClassList") : NULL;
-    const char *(*o_className)(void*) = libobjc ? dlsym(libobjc, "class_getName") : NULL;
-    if (o_getClassList && o_className) {
-        int total = o_getClassList(NULL, 0);
-        lg("[cap] total classes=%d", total);
-        if (total > 0 && total < 60000) {
-            void **list = malloc(sizeof(void*) * (size_t)total);
-            if (list) {
-                int got = o_getClassList(list, total);
-                int shown = 0;
-                for (int i = 0; i < got && shown < 40; i++) {
-                    const char *nm = o_className(list[i]);
-                    if (!nm) continue;
-                    if (strstr(nm, "Screen") || strstr(nm, "Shot") || strstr(nm, "Capture")) {
-                        lg("[cls] %s", nm);
-                        shown++;
-                    }
-                }
-                free(list);
+    CFDataRef data = f_dataNew(NULL, 0);
+    CFStringRef pngType = f_str(NULL, "public.png", 0x08000100);
+    void *dest = f_destNew(data, pngType, 1, NULL);
+    unsigned char *out = NULL;
+    if (dest) {
+        f_destAdd(dest, ci, NULL);
+        if (f_destFinal(dest)) {
+            long len = f_dataLen(data);
+            const void *b = f_dataBytes(data);
+            if (len > 0 && b) {
+                out = malloc((size_t)len);
+                if (out) { memcpy(out, b, (size_t)len); *outLen = (size_t)len; }
             }
         }
     }
-
-    void *mgr = o_getClass ? o_getClass("SBScreenshotManager") : NULL;
-        lg("[cap] mgr=%p", mgr);
-
-        if (mgr && o_msgSend && o_sel) {
-            void *selShared = o_sel("sharedInstance");
-            void *selNew    = o_sel("new");
-            void *selSave   = o_sel("saveScreenshots");
-            void *selSaveC  = o_sel("saveScreenshotsWithCompletion:");
-
-            int hasShared = (o_classGetClassMethod && o_classGetClassMethod(mgr, selShared)) ? 1 : 0;
-            int hasNew    = (o_classGetClassMethod && o_classGetClassMethod(mgr, selNew)) ? 1 : 0;
-            int hasSave   = (o_classGetInstMethod  && o_classGetInstMethod(mgr, selSave)) ? 1 : 0;
-            int hasSaveC  = (o_classGetInstMethod  && o_classGetInstMethod(mgr, selSaveC)) ? 1 : 0;
-            lg("[cap] has sharedInstance=%d new=%d saveScreenshots=%d saveWithCompletion=%d",
-               hasShared, hasNew, hasSave, hasSaveC);
-
-            void *inst = NULL;
-            if (hasShared) { inst = o_msgSend(mgr, selShared); lg("[cap] via sharedInstance inst=%p", inst); }
-            if (!inst && hasNew) { inst = o_msgSend(mgr, selNew); lg("[cap] via new inst=%p", inst); }
-
-            if (inst) {
-                if (hasSave) {
-                    o_msgSend(inst, selSave);
-                    lg("[cap] saveScreenshots called");
-                    triggered = 1;
-                } else if (hasSaveC) {
-                    o_msgSend(inst, selSaveC, (void*)0);
-                    lg("[cap] saveScreenshotsWithCompletion: called");
-                    triggered = 1;
-                } else {
-                    lg("[cap] no save selector on manager");
-                }
-            }
-        }
-
-
-    });
-    if (!triggered) { lg("[cap] no screenshot trigger available"); f_cfRelease(surf); return NULL; }
-
-    // 等相册出现新文件（不用 popen，iOS 里 fork 不可用）
-    char newest[512] = {0};
-    char baseline[512] = {0};
-    // 先记录基线
-    #define SCAN_LATEST(dst) do { \
-        const char *dirs[] = { "/var/mobile/Media/DCIM/125APPLE", "/var/mobile/Media/DCIM/100APPLE", NULL }; \
-        (dst)[0] = 0; \
-        for (int di = 0; dirs[di]; di++) { \
-            DIR *d = opendir(dirs[di]); \
-            if (!d) continue; \
-            struct dirent *e; \
-            while ((e = readdir(d)) != NULL) { \
-                if (strstr(e->d_name, ".PNG") || strstr(e->d_name, ".png")) { \
-                    if (strcmp(e->d_name, (dst) + strlen(dirs[di]) + 1) > 0 || (dst)[0] == 0) { \
-                        snprintf(dst, 512, "%s/%s", dirs[di], e->d_name); \
-                    } \
-                } \
-            } \
-            closedir(d); \
-        } \
-    } while(0)
-
-    SCAN_LATEST(baseline);
-    lg("[cap] baseline=%s", baseline);
-
-    struct timeval tv0; gettimeofday(&tv0, NULL);
-    for (int w = 0; w < 60; w++) {
-        usleep(100000);
-        char cur[512] = {0};
-        SCAN_LATEST(cur);
-        if (cur[0] && strcmp(cur, baseline) != 0) {
-            snprintf(newest, sizeof(newest), "%s", cur);
-            lg("[cap] new file: %s", newest);
-            break;
-        }
-    }
-    if (!newest[0]) lg("[cap] no new file after 6s (saveScreenshots produced nothing)");
-
-    if (!newest[0]) { f_cfRelease(surf); return NULL; }
-
-    FILE *fp = fopen(newest, "rb");
-    if (!fp) { lg("[cap] open file fail"); f_cfRelease(surf); return NULL; }
-    fseek(fp, 0, SEEK_END);
-    long flen = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    unsigned char *buf = malloc((size_t)flen);
-    if (buf && fread(buf, 1, (size_t)flen, fp) == (size_t)flen) {
-        *outLen = (size_t)flen;
-    } else { free(buf); buf = NULL; }
-    fclose(fp);
+    lg("[cap] png len=%zu", *outLen);
+    f_imgRelease(ci);
     f_cfRelease(surf);
-    lg("[cap] return png %zu bytes", *outLen);
-    return buf;
+    return out;
 }
 
 static void reply(int fd, int code, const char *reason, const char *ctype,
@@ -331,7 +213,7 @@ static void reply(int fd, int code, const char *reason, const char *ctype,
     send(fd, hdr, hl, 0);
     if (body && blen) {
         const unsigned char *p = body; size_t left = blen;
-        while (left) { ssize_t n = send(fd, p, left, 0); if (n<=0) break; p+=n; left-=(size_t)n; }
+        while (left) { ssize_t n = send(fd, p, left, 0); if (n <= 0) break; p += n; left -= (size_t)n; }
     }
 }
 
@@ -348,9 +230,8 @@ static void handle(int fd) {
     size_t len = 0;
     unsigned char *png = capture_png(&len);
     if (!png) { reply(fd,503,"Service Unavailable","text/plain","nocapture",9); close(fd); return; }
-
     reply(fd, 200, "OK", "image/png", png, len);
-    lg("[http] 200 png %zu bytes", len);
+    lg("[http] 200 png %zu", len);
     free(png);
     close(fd);
 }
@@ -372,15 +253,13 @@ static void *server_thread(void *arg) {
     a.sin_port = htons(kPort);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-    if (bind(fd, (struct sockaddr*)&a, sizeof(a)) != 0) {
-        lg("[svc] bind errno=%d", errno); close(fd); return NULL;
-    }
+    if (bind(fd, (struct sockaddr*)&a, sizeof(a)) != 0) { lg("[svc] bind errno=%d", errno); close(fd); return NULL; }
     if (listen(fd, 8) != 0) { lg("[svc] listen errno=%d", errno); close(fd); return NULL; }
     lg("[svc] listening 127.0.0.1:%d", kPort);
 
     for (;;) {
         int c = accept(fd, NULL, NULL);
-        if (c < 0) { if (errno==EINTR) continue; lg("[svc] accept errno=%d", errno); break; }
+        if (c < 0) { if (errno == EINTR) continue; lg("[svc] accept errno=%d", errno); break; }
         handle(c);
     }
     return NULL;
