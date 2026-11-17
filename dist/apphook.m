@@ -236,7 +236,13 @@ static NSString *dsh_tap(double nx, double ny) {
         CGPoint p = CGPointMake(nx * sz.width, ny * sz.height);
         dsh_dot(p);
 
-        UIView *v = [win hitTest:p withEvent:nil];
+        UIView *v = nil;
+        for (UIWindow *hw in [UIApplication sharedApplication].windows) {
+            @try {
+                UIView *h = [hw hitTest:p withEvent:nil];
+                if (h && h != hw) { v = h; break; }
+            } @catch (__unused NSException *e) {}
+        }
         if (!v) { result = @"no-view"; return; }
         lg(@"hit %.0f,%.0f -> %@", p.x, p.y, NSStringFromClass([v class]));
 
@@ -730,6 +736,11 @@ static void handle(int fd) {
         onMain(^{
             NSMutableString *s = [NSMutableString string];
             UIWindow *w = dsh_window();
+            [s appendFormat:@"# windows=%lu\n", (unsigned long)dsh_all_windows().count];
+            for (UIWindow *tw in dsh_all_windows()) {
+                [s appendFormat:@"@ %s %.0fx%.0f level=%.0f hidden=%d\n", NSStringFromClass([tw class]).UTF8String, tw.bounds.size.width, tw.bounds.size.height, tw.windowLevel, (int)tw.hidden];
+                dsh_dump(tw, 0, s, YES);
+            }
             [s appendFormat:@"# window=%s %.0fx%.0f\n",
                 w ? NSStringFromClass([w class]).UTF8String : "nil",
                 w ? w.bounds.size.width : 0, w ? w.bounds.size.height : 0];
