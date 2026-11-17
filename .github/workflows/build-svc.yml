@@ -1,0 +1,43 @@
+name: Build svc
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['src/svc/**', '.github/workflows/build-svc.yml']
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 19
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm19.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-19 lld-19 llvm-19
+      - name: Fetch SDK
+        run: |
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+      - name: Compile arm64 (chained fixups)
+        run: |
+          set -e
+          SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
+          mkdir -p out
+          /usr/lib/llvm-19/bin/clang -target arm64-apple-ios15.0 -isysroot "$SDK" \
+            -fuse-ld=/usr/lib/llvm-19/bin/ld64.lld -dynamiclib -O2 -DNDEBUG \
+            -Wl,-fixup_chains -Wl,-platform_version,ios,15.0,15.6 -Wl,-arch,arm64 \
+            -install_name /Library/MobileSubstrate/DynamicLibraries/DshSvc.dylib \
+            -o out/DshSvc.arm64.dylib src/svc/svc.m
+          ls -la out/
+          od -An -tx4 -N 12 out/DshSvc.arm64.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: svc
+          path: out/
+          retention-days: 7
