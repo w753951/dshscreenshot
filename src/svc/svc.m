@@ -10,6 +10,8 @@
 #include <pthread.h>
 
 #include <dlfcn.h>
+#include <dirent.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -264,31 +266,43 @@ static unsigned char *capture_png(size_t *outLen) {
     });
     if (!triggered) { lg("[cap] no screenshot trigger available"); f_cfRelease(surf); return NULL; }
 
-    // 等相册出现新文件
+    // 等相册出现新文件（不用 popen，iOS 里 fork 不可用）
     char newest[512] = {0};
-    for (int w = 0; w < 40; w++) {
+    char baseline[512] = {0};
+    // 先记录基线
+    #define SCAN_LATEST(dst) do { \
+        const char *dirs[] = { "/var/mobile/Media/DCIM/125APPLE", "/var/mobile/Media/DCIM/100APPLE", NULL }; \
+        (dst)[0] = 0; \
+        for (int di = 0; dirs[di]; di++) { \
+            DIR *d = opendir(dirs[di]); \
+            if (!d) continue; \
+            struct dirent *e; \
+            while ((e = readdir(d)) != NULL) { \
+                if (strstr(e->d_name, ".PNG") || strstr(e->d_name, ".png")) { \
+                    if (strcmp(e->d_name, (dst) + strlen(dirs[di]) + 1) > 0 || (dst)[0] == 0) { \
+                        snprintf(dst, 512, "%s/%s", dirs[di], e->d_name); \
+                    } \
+                } \
+            } \
+            closedir(d); \
+        } \
+    } while(0)
+
+    SCAN_LATEST(baseline);
+    lg("[cap] baseline=%s", baseline);
+
+    struct timeval tv0; gettimeofday(&tv0, NULL);
+    for (int w = 0; w < 60; w++) {
         usleep(100000);
-        // 用 popen 找最新 PNG（简单可靠）
-        FILE *pp = popen("ls -t /var/mobile/Media/DCIM/*/*.PNG 2>/dev/null | head -1", "r");
-        if (pp) {
-            char line[512] = {0};
-            if (fgets(line, sizeof(line), pp)) {
-                size_t L = strlen(line);
-                while (L && (line[L-1]=='\n'||line[L-1]=='\r')) line[--L]=0;
-                if (L && strcmp(line, newest) != 0) {
-                    if (newest[0] == 0) { strncpy(newest, line, sizeof(newest)-1); }
-                    else {
-                        strncpy(newest, line, sizeof(newest)-1);
-                        pclose(pp);
-                        lg("[cap] new file: %s", newest);
-                        break;
-                    }
-                }
-            }
-            pclose(pp);
+        char cur[512] = {0};
+        SCAN_LATEST(cur);
+        if (cur[0] && strcmp(cur, baseline) != 0) {
+            snprintf(newest, sizeof(newest), "%s", cur);
+            lg("[cap] new file: %s", newest);
+            break;
         }
     }
-    lg("[cap] newest=%s", newest);
+    if (!newest[0]) lg("[cap] no new file after 6s (saveScreenshots produced nothing)");
 
     if (!newest[0]) { f_cfRelease(surf); return NULL; }
 
