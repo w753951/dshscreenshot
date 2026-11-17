@@ -92,6 +92,43 @@ static BOOL dsh_fire_gesture(UIGestureRecognizer *g) {
     return NO;
 }
 
+/* 收集 cell 里的文字，便于确认点到了哪一行 */
+static NSString *dsh_cell_text(UIView *cell) {
+    NSMutableArray *parts = [NSMutableArray array];
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
+    int guard = 0;
+    while (stack.count && guard++ < 400) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if ([v isKindOfClass:[UILabel class]]) {
+            NSString *t = ((UILabel *)v).text;
+            if (t.length) [parts addObject:t];
+        } else if ([v isKindOfClass:[UITextView class]]) {
+            NSString *t = ((UITextView *)v).text;
+            if (t.length) [parts addObject:t];
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
+    NSString *joined = [parts componentsJoinedByString:@" | "];
+    if (joined.length > 80) joined = [joined substringToIndex:80];
+    return joined.length ? joined : @"(空)";
+}
+
+/* 在整棵子树里找手势并触发 */
+static BOOL dsh_fire_gesture_tree(UIView *root, int maxDepth) {
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int guard = 0;
+    while (stack.count && guard++ < 300) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if ([g isKindOfClass:[UITapGestureRecognizer class]] && dsh_fire_gesture(g)) return YES;
+        }
+        if (maxDepth > 0) [stack addObjectsFromArray:v.subviews];
+    }
+    return NO;
+}
+
 static NSString *dsh_tap(double nx, double ny) {
     __block NSString *result = @"no-window";
     void (^work)(void) = ^{
@@ -135,33 +172,41 @@ static NSString *dsh_tap(double nx, double ny) {
             cur = cur.superview;
         }
 
-        /* 3) 列表：先 selectRow，再兜底 delegate */
+        /* 3) 列表：优先 cell 内部手势，再 selectRow + delegate；同时回传会话名 */
         cur = v;
         while (cur) {
-            if ([cur isKindOfClass:[UITableViewCell class]]) {
-                UITableView *tv = dsh_tableFor(cur);
-                NSIndexPath *ip = tv ? [tv indexPathForCell:(UITableViewCell *)cur] : nil;
-                if (tv && ip) {
-                    [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
-                    id<UITableViewDelegate> del = tv.delegate;
-                    if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
-                        [del tableView:tv didSelectRowAtIndexPath:ip];
-                    }
-                    result = [NSString stringWithFormat:@"table-row:%ld-%ld", (long)ip.section, (long)ip.row];
+            if ([cur isKindOfClass:[UITableViewCell class]] || [cur isKindOfClass:[UICollectionViewCell class]]) {
+                NSString *txt = dsh_cell_text(cur);
+                /* 3a) cell 子树上的手势 */
+                if (dsh_fire_gesture_tree(cur, 8)) {
+                    result = [NSString stringWithFormat:@"cell-gesture:%@", txt];
                     return;
                 }
-            }
-            if ([cur isKindOfClass:[UICollectionViewCell class]]) {
-                UICollectionView *cv = dsh_collectionFor(cur);
-                NSIndexPath *ip = cv ? [cv indexPathForCell:(UICollectionViewCell *)cur] : nil;
-                if (cv && ip) {
-                    [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
-                    id<UICollectionViewDelegate> del = cv.delegate;
-                    if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-                        [del collectionView:cv didSelectItemAtIndexPath:ip];
+                /* 3b) selectRow + delegate */
+                if ([cur isKindOfClass:[UITableViewCell class]]) {
+                    UITableView *tv = dsh_tableFor(cur);
+                    NSIndexPath *ip = tv ? [tv indexPathForCell:(UITableViewCell *)cur] : nil;
+                    if (tv && ip) {
+                        [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+                        id<UITableViewDelegate> del = tv.delegate;
+                        if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                            [del tableView:tv didSelectRowAtIndexPath:ip];
+                        }
+                        result = [NSString stringWithFormat:@"table-row:%@", txt];
+                        return;
                     }
-                    result = [NSString stringWithFormat:@"collection-item:%ld-%ld", (long)ip.section, (long)ip.item];
-                    return;
+                } else {
+                    UICollectionView *cv = dsh_collectionFor(cur);
+                    NSIndexPath *ip = cv ? [cv indexPathForCell:(UICollectionViewCell *)cur] : nil;
+                    if (cv && ip) {
+                        [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+                        id<UICollectionViewDelegate> del = cv.delegate;
+                        if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                            [del collectionView:cv didSelectItemAtIndexPath:ip];
+                        }
+                        result = [NSString stringWithFormat:@"collection-item:%@", txt];
+                        return;
+                    }
                 }
             }
             cur = cur.superview;
