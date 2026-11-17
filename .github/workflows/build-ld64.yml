@@ -1,4 +1,4 @@
-name: Build probe with cctools ld64
+name: Build probe with conda ld64
 
 on:
   workflow_dispatch:
@@ -9,70 +9,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM 19 + base deps
+      - name: Install LLVM 19
         run: |
           set -e
           sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc >/dev/null
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm19.list >/dev/null
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-19 llvm-19 libclang-19-dev llvm-19-dev
-          sudo apt-get install -y -qq git make autoconf automake libtool \
-            libssl-dev libxml2-dev pkg-config zlib1g-dev libncurses-dev \
-            wget unzip build-essential
+          sudo apt-get install -y -qq clang-19 llvm-19
 
-      - name: Install libblocksruntime
+      - name: Install conda ld64
         run: |
           set -e
-          sudo apt-get install -y -qq libblocksruntime-dev libbsd-dev
-          ls /usr/include/Block.h && echo "Block.h OK"
-          ldconfig -p | grep -i blocks
+          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O mf.sh
+          bash mf.sh -b -p $HOME/mf
+          $HOME/mf/bin/conda install -y -q -c conda-forge ld64_osx-64 2>&1 | tail -5
+          echo "--- ld64 binaries ---"
+          find $HOME/mf -name 'ld64*' -o -name 'ld' | head -10
+          ls $HOME/mf/bin/ | grep -iE 'ld|lipo' || true
 
-      - name: Build cctools ld64
-        run: |
-          set -e
-          git clone --depth=1 https://github.com/tpoechtrager/cctools-port.git
-          cd cctools-port/cctools
-          ./autogen.sh
-          ./configure --prefix=/usr/local --target=x86_64-apple-darwin \
-            --with-llvm-config=/usr/lib/llvm-19/bin/llvm-config \
-            --enable-ld64 --disable-ld64-plugin --disable-lto
-          make -j$(nproc)
-          sudo make install
-          ls -la /usr/local/bin/ | grep -iE 'ld64|lipo|strip' || true
-
-      - name: Fetch iOS SDK
+      - name: Fetch SDK
         run: |
           wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
           unzip -q sdks.zip
-          echo "SDK_ROOT=$PWD/sdks-master" >> $GITHUB_ENV
 
-      - name: Compile with real arm64e
+      - name: Compile arm64e with ld64
         run: |
-          SDK="$SDK_ROOT/iPhoneOS15.6.sdk"
-          [ -d "$SDK" ] || SDK=$(ls -d $SDK_ROOT/iPhoneOS*.sdk | tail -1)
-          echo "--- /usr/local/bin ---"
-          ls /usr/local/bin/ | grep -iE 'ld64|lipo' || true
-          LD64=$(ls /usr/local/bin/ld64* 2>/dev/null | head -1)
+          SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
+          LD64=$(find $HOME/mf -name 'ld64' -type f | head -1)
           echo "LD64=$LD64"
-          CLANG=/usr/lib/llvm-19/bin/clang
+          $LD64 -v 2>&1 | head -3 || true
+          C=/usr/lib/llvm-19/bin/clang
           mkdir -p out
           for ARCH in arm64 arm64e; do
             X=""
             [ "$ARCH" = "arm64e" ] && X="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
-            $CLANG -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
+            $C -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
               -fuse-ld="$LD64" -dynamiclib -O2 -fblocks $X -DNDEBUG \
               -framework Foundation \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshMin.dylib \
               -o out/DshMin.$ARCH.dylib src/probe/probe.m && echo "$ARCH OK" || echo "$ARCH FAILED"
           done
-          echo "--- results ---"
           ls -la out/
           for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
+          echo "--- load cmds of arm64e ---"
+          [ -f out/DshMin.arm64e.dylib ] && od -c out/DshMin.arm64e.dylib | head -3
 
       - uses: actions/upload-artifact@v4
         with:
-          name: probe-ld64
+          name: probe-conda
           path: out/
           retention-days: 7
           if-no-files-found: warn
