@@ -171,87 +171,88 @@ static unsigned char *capture_png(size_t *outLen) {
     void *base0 = f_surfaceBase(surf);
     lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
 
-    // 方案 B：IOMobileFramebuffer 直接拿主屏 surface
-    void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-    void *imf   = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
-    lg("[cap] iokit=%p imf=%p", iokit, imf);
+    // 方案 C：让 SpringBoard 自己截图（SBScreenShotter / SBScreenshotManager）
+    void *libobjc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
+    void *(*o_getClass)(const char*) = libobjc ? dlsym(libobjc, "objc_getClass") : NULL;
+    void *(*o_msgSend)(void*, void*, ...) = libobjc ? dlsym(libobjc, "objc_msgSend") : NULL;
+    void *(*o_sel)(const char*) = libobjc ? dlsym(libobjc, "sel_registerName") : NULL;
+    lg("[cap] objc getClass=%p msgSend=%p sel=%p", (void*)o_getClass, (void*)o_msgSend, (void*)o_sel);
 
-    unsigned (*fb_open)(void) = imf ? dlsym(imf, "IOMobileFramebufferOpen") : NULL;
-    int (*fb_getMain)(unsigned*) = imf ? dlsym(imf, "IOMobileFramebufferGetMainDisplay") : NULL;
-    int (*fb_getLayer)(unsigned, int, IOSurfaceRef*) = imf ? dlsym(imf, "IOMobileFramebufferGetLayerDefaultSurface") : NULL;
-    lg("[cap] fb_open=%p getMain=%p getLayer=%p", (void*)fb_open, (void*)fb_getMain, (void*)fb_getLayer);
-
-    IOSurfaceRef fbSurf = NULL;
-
-    // 优先用 GetMainDisplay
-    if (fb_getMain) {
-        unsigned fb = 0;
-        int r = fb_getMain(&fb);
-        lg("[cap] getMain rc=%d fb=%u", r, fb);
-        if (fb && fb_getLayer) {
-            int r2 = fb_getLayer(fb, 0, &fbSurf);
-            lg("[cap] getLayer rc=%d surf=%p", r2, (void*)fbSurf);
-        }
-    }
-    // 退化到 Open
-    if (!fbSurf && fb_open && fb_getLayer) {
-        unsigned fb = fb_open();
-        lg("[cap] fb_open -> %u", fb);
-        if (fb) {
-            int r = fb_getLayer(fb, 0, &fbSurf);
-            lg("[cap] getLayer(open) rc=%d surf=%p", r, (void*)fbSurf);
-        }
+    const char *cls_names[] = { "SBScreenShotter", "SBScreenshotManager", "SBScreenFlash", NULL };
+    for (int i = 0; cls_names[i]; i++) {
+        void *c = o_getClass ? o_getClass(cls_names[i]) : NULL;
+        lg("[cap] class %s = %p", cls_names[i], c);
     }
 
-    if (!fbSurf) { lg("[cap] no fb surface"); f_cfRelease(surf); return NULL; }
-
-    size_t fbw = f_surfaceW ? f_surfaceW(fbSurf) : 0;
-    size_t fbh = f_surfaceH ? f_surfaceH(fbSurf) : 0;
-    size_t fbpr = f_surfaceBPR(fbSurf);
-    void *fbbase = f_surfaceBase(fbSurf);
-    lg("[cap] fb surface w=%zu h=%zu bpr=%zu base=%p", fbw, fbh, fbpr, fbbase);
-    if (!fbw || !fbh || !fbbase) { lg("[cap] bad fb surface"); f_cfRelease(surf); return NULL; }
-
-    // 采样确认非空
-    size_t nz2 = 0;
-    const unsigned char *pfb = (const unsigned char*)fbbase;
-    size_t tot2 = fbpr * fbh;
-    for (size_t i = 0; i < tot2; i += 97) if (pfb[i]) nz2++;
-    lg("[cap] fb sampled-nonzero=%zu", nz2);
-
-    size_t bw = fbw, bh = fbh, bpr = fbpr;
-    void *base = fbbase;
-
-    CGColorSpaceRef cs = f_csDeviceRGB();
-    CGContextRef ctx = f_bitmapCtxCreate(base, bw, bh, 8, bpr, cs,
-        1 /*kCGImageAlphaPremultipliedFirst*/ | (2<<12) /*ByteOrder32Little*/);
-    f_csRelease(cs);
-    if (!ctx) { lg("[cap] ctx fail"); f_cfRelease(surf); return NULL; }
-
-    CGImageRef cg = f_ctxCreateImage(ctx);
-    f_ctxRelease(ctx);
-    if (!cg) { lg("[cap] cgimg fail"); f_cfRelease(surf); return NULL; }
-
-    CFDataRef data = f_dataCreateMutable(NULL, 0);
-    CFStringRef pngType = f_strCreate(NULL, "public.png", 0x08000100);
-    void *dest = f_imgDestCreate(data, pngType, 1, NULL);
-    unsigned char *out = NULL;
-    if (dest) {
-        f_imgDestAdd(dest, cg, NULL);
-        if (f_imgDestFinal(dest)) {
-            long len = f_dataLen(data);
-            const void *bytes = f_dataBytes(data);
-            if (len > 0 && bytes) {
-                out = malloc((size_t)len);
-                if (out) { memcpy(out, bytes, (size_t)len); *outLen = (size_t)len; }
+    int triggered = 0;
+    if (o_getClass && o_msgSend && o_sel) {
+        void *shotter = o_getClass("SBScreenShotter");
+        if (shotter) {
+            void *inst = o_msgSend(shotter, o_sel("sharedInstance"));
+            lg("[cap] shotter inst=%p", inst);
+            if (inst) {
+                o_msgSend(inst, o_sel("saveScreenshot:"), 1);
+                lg("[cap] saveScreenshot: called");
+                triggered = 1;
+            }
+        }
+        if (!triggered) {
+            void *mgr = o_getClass("SBScreenshotManager");
+            if (mgr) {
+                void *inst = o_msgSend(mgr, o_sel("sharedInstance"));
+                lg("[cap] screenshotManager inst=%p", inst);
+                if (inst) {
+                    o_msgSend(inst, o_sel("saveScreenshots"));
+                    lg("[cap] saveScreenshots called");
+                    triggered = 1;
+                }
             }
         }
     }
-    lg("[cap] png len=%zu", *outLen);
 
-    f_imgRelease(cg);
+    if (!triggered) { lg("[cap] no screenshot trigger available"); f_cfRelease(surf); return NULL; }
+
+    // 等相册出现新文件
+    char newest[512] = {0};
+    for (int w = 0; w < 40; w++) {
+        usleep(100000);
+        // 用 popen 找最新 PNG（简单可靠）
+        FILE *pp = popen("ls -t /var/mobile/Media/DCIM/*/*.PNG 2>/dev/null | head -1", "r");
+        if (pp) {
+            char line[512] = {0};
+            if (fgets(line, sizeof(line), pp)) {
+                size_t L = strlen(line);
+                while (L && (line[L-1]=='\n'||line[L-1]=='\r')) line[--L]=0;
+                if (L && strcmp(line, newest) != 0) {
+                    if (newest[0] == 0) { strncpy(newest, line, sizeof(newest)-1); }
+                    else {
+                        strncpy(newest, line, sizeof(newest)-1);
+                        pclose(pp);
+                        lg("[cap] new file: %s", newest);
+                        break;
+                    }
+                }
+            }
+            pclose(pp);
+        }
+    }
+    lg("[cap] newest=%s", newest);
+
+    if (!newest[0]) { f_cfRelease(surf); return NULL; }
+
+    FILE *fp = fopen(newest, "rb");
+    if (!fp) { lg("[cap] open file fail"); f_cfRelease(surf); return NULL; }
+    fseek(fp, 0, SEEK_END);
+    long flen = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    unsigned char *buf = malloc((size_t)flen);
+    if (buf && fread(buf, 1, (size_t)flen, fp) == (size_t)flen) {
+        *outLen = (size_t)flen;
+    } else { free(buf); buf = NULL; }
+    fclose(fp);
     f_cfRelease(surf);
-    return out;
+    lg("[cap] return png %zu bytes", *outLen);
+    return buf;
 }
 
 static void reply(int fd, int code, const char *reason, const char *ctype,
