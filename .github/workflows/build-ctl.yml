@@ -15,8 +15,9 @@ jobs:
 
       - name: deps
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wget unzip xz-utils curl libtinfo5 libncurses5 ldid || true
+          sudo apt-get update
+          sudo apt-get install -y libtinfo5 libncurses5 wget unzip xz-utils curl
+          ls -l /lib/x86_64-linux-gnu/libtinfo.so.5 || ls -l /usr/lib/x86_64-linux-gnu/libtinfo.so.5
 
       - name: toolchain
         run: |
