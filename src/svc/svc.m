@@ -232,7 +232,10 @@ static void send_touch(int phase, double x, double y, uint32_t ident) {
     xDispatch(gHid, finger);
 }
 
+static void show_dot(double nx, double ny);   /* 定义在后面 */
+
 static void do_tap(double x, double y, int ms) {
+    show_dot(x, y);                    /* 先亮圆点：用户能看见 AI 打算点哪儿 */
     send_touch(0, x, y, 0x2001);
     usleep(ms * 1000);
     send_touch(2, x, y, 0x2001);
@@ -241,10 +244,13 @@ static void do_tap(double x, double y, int ms) {
 static void do_swipe(double x1, double y1, double x2, double y2, int ms) {
     const int steps = 18;
     int step_ms = ms / steps; if (step_ms < 1) step_ms = 1;
+    show_dot(x1, y1);
     send_touch(0, x1, y1, 0x2002);
     for (int i = 1; i <= steps; i++) {
         double t = (double)i / steps;
-        send_touch(1, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, 0x2002);
+        double cx = x1 + (x2 - x1) * t, cy = y1 + (y2 - y1) * t;
+        show_dot(cx, cy);              /* 圆点跟着滑动轨迹走 */
+        send_touch(1, cx, cy, 0x2002);
         usleep(step_ms * 1000);
     }
     send_touch(2, x2, y2, 0x2002);
