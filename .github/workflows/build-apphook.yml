@@ -1,0 +1,54 @@
+name: Build apphook (in-process UI tap)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/apphook/**'
+      - '.github/workflows/build-apphook.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xz-utils curl libtinfo5 libncurses5 ldid || true
+
+      - name: toolchain
+        run: |
+          set -e
+          curl -L -o tc.tar.lzma https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          mkdir -p $HOME/tc && tar xf tc.tar.lzma -C $HOME/tc
+          $HOME/tc/ios-arm64e-clang-toolchain/bin/clang --version | head -2
+
+      - name: sdk
+        run: |
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+
+      - name: compile
+        run: |
+          set -e
+          C=$HOME/tc/ios-arm64e-clang-toolchain/bin/clang
+          SDK=$PWD/sdks-master/iPhoneOS13.7.sdk
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | sort -V | head -1)
+          mkdir -p out
+          for ARCH in arm64 arm64e; do
+            $C -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
+              -dynamiclib -O2 -fobjc-arc -fblocks -DNDEBUG \
+              -framework Foundation -framework UIKit \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshAppHook.dylib \
+              -o out/DshAppHook.$ARCH.dylib src/apphook/apphook.m && echo "$ARCH OK" || echo "$ARCH FAILED"
+          done
+          ls -la out/
+          for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apphook
+          path: out/
+          retention-days: 7
