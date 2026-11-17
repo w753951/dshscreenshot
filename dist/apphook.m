@@ -372,7 +372,7 @@ static NSString *dsh_tap_row(long sec, long row) {
 
 /* 取字符串参数（支持 %XX 解码） */
 static const char *qstr(const char *req, const char *name) {
-    static __thread char buf[768];
+    static char buf[768];
     char pat[32]; snprintf(pat, sizeof(pat), "%s=", name);
     const char *p = strstr(req, pat);
     if (!p) { buf[0] = 0; return buf; }
