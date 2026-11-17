@@ -79,6 +79,7 @@ static uint64_t (*pGetSenderID)(IOHIDEventRef) = NULL;
 static int      (*pGetType)(IOHIDEventRef) = NULL;
 static void     (*pSetSenderID)(IOHIDEventRef, uint64_t) = NULL;
 static int      (*pRegisterCb)(IOHIDEventSystemClientRef, void *, void *, void *) = NULL;
+static void     (*pScheduleRL)(IOHIDEventSystemClientRef, void *, void *) = NULL;
 
 static int gMode = 0;   /* 注入模式，见 do_tap */
 
@@ -112,6 +113,7 @@ static int init_hid(void) {
     pGetType     = (void *)find("IOHIDEventGetType");
     pSetSenderID = (void *)find("IOHIDEventSetSenderID");
     pRegisterCb  = (void *)find("IOHIDEventSystemClientRegisterEventCallback");
+    pScheduleRL  = (void *)find("IOHIDEventSystemClientScheduleWithRunLoop");
     if (!pCreate || !pDispatch || (!pFinger && !pDigitizer)) return 0;
     gClient = pCreate(kCFAllocatorDefault);
     if (!gClient && pCreateType) gClient = pCreateType(kCFAllocatorDefault, 0, NULL);
@@ -161,6 +163,7 @@ static int do_listen(int seconds) {
     if (!c) { printf("no client\n"); return 2; }
     if (pSetProp) pSetProp(c, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
     pRegisterCb(c, (void *)sender_cb, NULL, NULL);
+    if (pScheduleRL) pScheduleRL(c, (void *)CFRunLoopGetCurrent(), (void *)kCFRunLoopDefaultMode);
     printf("listening %ds — 现在用手指真实触摸一下屏幕\n", seconds);
     for (int i = 0; i < seconds; i++) {
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, false);
