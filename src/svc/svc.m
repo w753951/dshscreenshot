@@ -150,28 +150,15 @@ static unsigned char *capture_png(size_t *outLen) {
     IOSurfaceRef surf = f_surfaceCreate(props);
     if (!surf) { lg("[cap] IOSurfaceCreate fail %zux%zu", W, H); return NULL; }
 
-    // 诊断：先看 surface 真实属性
     size_t bw0 = f_surfaceW ? f_surfaceW(surf) : 0;
     size_t bh0 = f_surfaceH ? f_surfaceH(surf) : 0;
     size_t bpr0 = f_surfaceBPR(surf);
     void *base0 = f_surfaceBase(surf);
     lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
 
-    // 尝试多个 ctx id 与显示名
-    CFStringRef lcd  = f_strCreate(NULL, "LCD", 0x08000100);
-    CFStringRef main_ = f_strCreate(NULL, "Main", 0x08000100);
-    CFStringRef disp = f_strCreate(NULL, "display", 0x08000100);
-    int rc = -1, usedCtx = -1;
-    CFStringRef names[3] = { lcd, main_, disp };
-    for (int ci = 0; ci <= 6 && rc != 0; ci++) {
-        for (int ni = 0; ni < 3 && rc != 0; ni++) {
-            if (!names[ni]) continue;
-            int r = f_renderDisplay((unsigned)ci, names[ni], surf);
-            lg("[cap] try ctx=%d name=%d rc=%d", ci, ni, r);
-            if (r == 0) { rc = 0; usedCtx = ci; }
-        }
-    }
-    lg("[cap] render done rc=%d ctx=%d", rc, usedCtx);
+    CFStringRef lcd = f_strCreate(NULL, "LCD", 0x08000100);
+    int rc = f_renderDisplay(1, lcd, surf);
+    lg("[cap] render ctx=1 rc=%d", rc);
     if (rc != 0) { f_cfRelease(surf); return NULL; }
 
     size_t bw = f_surfaceW ? f_surfaceW(surf) : W;
