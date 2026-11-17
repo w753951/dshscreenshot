@@ -1,4 +1,4 @@
-name: Build with Theos toolchain
+name: Build with sbingner arm64e toolchain
 
 on:
   workflow_dispatch:
@@ -11,49 +11,44 @@ jobs:
 
       - name: Install deps
         run: |
-          set -e
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wget unzip git libncurses-dev libssl-dev
+          sudo apt-get install -y -qq wget unzip xz-utils curl
 
-      - name: Fetch Theos toolchain (prebuilt Linux)
+      - name: Fetch arm64e toolchain
         run: |
           set -e
-          mkdir -p $HOME/toolchain
-          URL=https://github.com/theos/toolchain/releases/latest/download/linux-x86_64.zip
-          echo "URL=$URL"
-          wget -q "$URL" -O tc.zip && echo "download ok" || echo "download FAILED"
-          ls -la tc.zip
-          unzip -q -o tc.zip -d $HOME/toolchain
-          echo "--- toolchain tree ---"
-          find $HOME/toolchain -maxdepth 3 -type f \( -name 'ld64' -o -name 'clang*' -o -name 'ldid' \) | head -20
-          echo "--- all bin ---"
-          ls $HOME/toolchain/toolchain/linux/iphone/bin/ 2>/dev/null | head -30 || find $HOME/toolchain -maxdepth 4 -type d -name bin | head
+          URL=https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          curl -L -o tc.tar.lzma "$URL"
+          ls -la tc.tar.lzma
+          mkdir -p $HOME/tc
+          tar xf tc.tar.lzma -C $HOME/tc
+          echo "--- tree ---"
+          ls $HOME/tc
+          find $HOME/tc -maxdepth 3 -name 'clang*' -o -maxdepth 3 -name 'ld64*' | head -10
 
       - name: Fetch SDK
         run: |
           wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
           unzip -q sdks.zip
 
-      - name: Compile real arm64e
+      - name: Compile arm64e
         run: |
-          TC=$HOME/toolchain/toolchain/linux/iphone
+          TC=$(ls -d $HOME/tc/*/ 2>/dev/null | head -1)
+          [ -z "$TC" ] && TC=$HOME/tc
+          echo "TC=$TC"
+          ls $TC
           BIN=$TC/bin
-          echo "--- BIN=$BIN ---"
-          ls $BIN 2>/dev/null | head -30
           SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
           [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
+          echo "SDK=$SDK"
           mkdir -p out
           CLANG=$BIN/clang
-          [ -x "$CLANG" ] || CLANG=$(ls $BIN/*clang* 2>/dev/null | head -1)
-          echo "CLANG=$CLANG"
-          $CLANG --version 2>&1 | head -2 || true
+          $CLANG --version 2>&1 | head -3 || echo "clang missing"
           for ARCH in arm64 arm64e; do
-            X=""
-            [ "$ARCH" = "arm64e" ] && X="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
+            echo "=== $ARCH ==="
             $CLANG -target ${ARCH}-apple-ios15.0 \
               -isysroot "$SDK" \
-              -B "$BIN" \
-              -dynamiclib -O2 -fblocks $X -DNDEBUG \
+              -dynamiclib -O2 -fblocks -DNDEBUG \
               -framework Foundation \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshMin.dylib \
               -o out/DshMin.$ARCH.dylib src/probe/probe.m && echo "$ARCH OK" || echo "$ARCH FAILED"
@@ -63,7 +58,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: probe-theos
+          name: probe-tc
           path: out/
           retention-days: 7
           if-no-files-found: warn
