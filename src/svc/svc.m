@@ -201,7 +201,31 @@ static unsigned char *capture_png(size_t *outLen) {
         void *(*o_classGetInstMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getInstanceMethod") : NULL;
         lg("[cap] classGetClassMethod=%p classGetInstMethod=%p", (void*)o_classGetClassMethod, (void*)o_classGetInstMethod);
 
-        void *mgr = o_getClass ? o_getClass("SBScreenshotManager") : NULL;
+        // 枚举所有含 Screen/Shot/Capture 的类
+    int (*o_getClassList)(void**, int) = libobjc ? dlsym(libobjc, "objc_getClassList") : NULL;
+    const char *(*o_className)(void*) = libobjc ? dlsym(libobjc, "class_getName") : NULL;
+    if (o_getClassList && o_className) {
+        int total = o_getClassList(NULL, 0);
+        lg("[cap] total classes=%d", total);
+        if (total > 0 && total < 60000) {
+            void **list = malloc(sizeof(void*) * (size_t)total);
+            if (list) {
+                int got = o_getClassList(list, total);
+                int shown = 0;
+                for (int i = 0; i < got && shown < 40; i++) {
+                    const char *nm = o_className(list[i]);
+                    if (!nm) continue;
+                    if (strstr(nm, "Screen") || strstr(nm, "Shot") || strstr(nm, "Capture")) {
+                        lg("[cls] %s", nm);
+                        shown++;
+                    }
+                }
+                free(list);
+            }
+        }
+    }
+
+    void *mgr = o_getClass ? o_getClass("SBScreenshotManager") : NULL;
         lg("[cap] mgr=%p", mgr);
 
         if (mgr && o_msgSend && o_sel) {
