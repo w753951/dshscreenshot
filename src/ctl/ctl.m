@@ -66,7 +66,10 @@ static void (*pDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
 static void (*pAppend)(IOHIDEventRef, IOHIDEventRef);
 static IOHIDEventRef (*pKey)(CFAllocatorRef, DshTime, uint32_t usage, Boolean down, CFOptionFlags opts);
 static void (*pSetInt)(IOHIDEventRef, uint32_t field, CFIndex value);
+static void (*pSetFloat)(IOHIDEventRef, uint32_t field, IOHIDFloat value);
 static IOHIDEventSystemClientRef (*pCreateType)(CFAllocatorRef, int type, void *err);
+
+static IOHIDEventRef gHand = NULL;   /* 复用同一个 hand 父事件（SimulateTouch 做法） */
 
 static int gMode = 0;   /* 注入模式，见 do_tap */
 
@@ -94,6 +97,7 @@ static int init_hid(void) {
     pAppend    = (void *)find("IOHIDEventAppendEvent");
     pKey       = (void *)find("IOHIDEventCreateKeyboardEvent");
     pSetInt    = (void *)find("IOHIDEventSetIntegerValue");
+    pSetFloat  = (void *)find("IOHIDEventSetFloatValue");
     pCreateType= (void *)find("IOHIDEventSystemClientCreateWithType");
     if (!pCreate || !pDispatch || (!pFinger && !pDigitizer)) return 0;
     gClient = pCreate(kCFAllocatorDefault);
@@ -115,38 +119,44 @@ static int reclient(int type) {
 
 static void msleep(int ms) { if (ms > 0) usleep((useconds_t)ms * 1000); }
 
-/* 发一次触摸：必须 hand 事件 + append finger 子事件，单独 finger 会被系统忽略 */
+/* 按 SimulateTouch 的做法发触摸：
+ *   - hand 父事件只创建一次并复用，自身带 IsDisplayIntegrated
+ *   - finger 子事件 append 到父事件，然后 dispatch 父事件
+ *   - 坐标是归一化 0..1（不是 pt，也不是 px）
+ */
 static void send_touch(int phase, double x, double y, uint32_t ident) {
-    uint32_t mask; Boolean range, touch;
-    if (phase == 2) { mask = EV_RANGE | EV_TOUCH;          range = 0; touch = 0; }
-    else            { mask = EV_RANGE | EV_TOUCH | EV_POS; range = 1; touch = 1; }
+    if (!gHand && pDigitizer) {
+        gHand = pDigitizer(kCFAllocatorDefault, mach_absolute_time(), 3 /*hand*/, 0, 0,
+                           EV_TOUCH, 0, 0.f, 0.f, 0.f, 0.f, 0.f, 1, 0, 0);
+        if (gHand && pSetInt) {
+            pSetInt(gHand, 0x000B0010, 1);
+            pSetInt(gHand, 0x000B0007, 1);
+        }
+    }
 
-    DshTime ts = mach_absolute_time();
+    uint32_t mask; Boolean range, touch;
+    if (phase == 2)      { mask = EV_TOUCH | EV_RANGE;          range = 0; touch = 0; }
+    else if (phase == 1) { mask = EV_TOUCH | EV_RANGE | EV_POS; range = 1; touch = 1; }
+    else                 { mask = EV_TOUCH | EV_RANGE;          range = 1; touch = 1; }
+
     IOHIDEventRef finger = NULL;
     if (pFinger)
-        finger = pFinger(kCFAllocatorDefault, ts, 0, ident, mask, 0,
-                         (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
+        finger = pFinger(kCFAllocatorDefault, mach_absolute_time(), 0, 3, mask, 0,
+                         (IOHIDFloat)x, (IOHIDFloat)y, 0.f, 0.f, 0.f, range, touch, 0);
     if (!finger && pDigitizer)
-        finger = pDigitizer(kCFAllocatorDefault, ts, 2 /*finger*/, 0, ident, mask, 0,
-                            (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
+        finger = pDigitizer(kCFAllocatorDefault, mach_absolute_time(), 2, 0, 3, mask, 0,
+                            (IOHIDFloat)x, (IOHIDFloat)y, 0.f, 0.f, 0.f, range, touch, 0);
     if (!finger) return;
 
-    /* 模式 1/3/4/5/6：补 display-integrated 标记，否则 SpringBoard 认为坐标不在显示层上 */
-    if ((gMode & 1) && pSetInt) pSetInt(finger, 0x000B0007 /* kIOHIDEventFieldDigitizerIsDisplayIntegrated */, 1);
+    if (pSetFloat) {                          /* major/minor radius，仿真手指粗细 */
+        pSetFloat(finger, 0x000B0014, 0.04f);
+        pSetFloat(finger, 0x000B0015, 0.04f);
+    }
 
-    /* 模式 6（bit2）：不套 hand，直接发 finger */
-    if (gMode & 2) { pDispatch(gClient, finger); return; }
-
-    if (pDigitizer && pAppend) {
-        IOHIDEventRef hand = pDigitizer(kCFAllocatorDefault, ts, 3 /*hand*/, 0, ident,
-                                        EV_RANGE | EV_TOUCH, 0,
-                                        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, range, 0, 0);
-        if (hand) {
-            if ((gMode & 1) && pSetInt) pSetInt(hand, 0x000B0007, 1);
-            pAppend(hand, finger);
-            pDispatch(gClient, hand);
-            return;
-        }
+    if (gHand && pAppend) {
+        pAppend(gHand, finger);
+        pDispatch(gClient, gHand);
+        return;
     }
     pDispatch(gClient, finger);
 }
