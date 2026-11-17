@@ -256,6 +256,104 @@ static double qnum(const char *req, const char *name, double def) {
     return p ? atof(p + strlen(pat)) : def;
 }
 
+/* ================= 触摸圆点：在 SpringBoard 里画一个可见的触点 ================= */
+typedef struct { double x, y, w, h; } DshRect;
+
+static void *gDotWin = NULL;
+static void *gDotView = NULL;
+static void *gMsg = NULL;
+static void *(*gSel)(const char *) = NULL;
+static void *(*gGetClass)(const char *) = NULL;
+
+static void dot_load(void) {
+    void *libobjc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
+    if (libobjc) {
+        gGetClass = dlsym(libobjc, "objc_getClass");
+        gSel = dlsym(libobjc, "sel_registerName");
+        gMsg = dlsym(libobjc, "objc_msgSend");
+    }
+    dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
+}
+
+#define SEND(obj, name) ((void *(*)(void *, void *))gMsg)((obj), gSel(name))
+#define SEND1(obj, name, a) ((void *(*)(void *, void *, void *))gMsg)((obj), gSel(name), (void *)(a))
+#define SEND1D(obj, name, d) ((void *(*)(void *, void *, double))gMsg)((obj), gSel(name), (d))
+#define SEND1R(obj, name, r) ((void *(*)(void *, void *, DshRect))gMsg)((obj), gSel(name), (r))
+
+static DshRect dot_bounds(void) {
+    DshRect b = {0, 0, 428, 926};
+    void *screen = SEND(gGetClass("UIScreen"), "mainScreen");
+    if (screen) {
+        DshRect r = ((DshRect (*)(void *, void *))gMsg)(screen, gSel("bounds"));
+        if (r.w > 1 && r.h > 1) b = r;
+    }
+    return b;
+}
+
+/* 在 (nx, ny) 归一化位置显示一个红点；保持 1.6 秒后自动隐藏 */
+static void show_dot_impl(double nx, double ny) {
+    if (!gMsg || !gSel || !gGetClass) { lg("[dot] no objc"); return; }
+    DshRect b = dot_bounds();
+
+    if (!gDotWin) {
+        DshRect full = {0, 0, b.w, b.h};
+        void *win = SEND(gGetClass("UIWindow"), "alloc");
+        win = SEND1R(win, "initWithFrame:", full);
+        if (!win) { lg("[dot] no window"); return; }
+        SEND1D(win, "setWindowLevel:", 10000001.0);
+        void *no = SEND(gGetClass("NSNumber"), "numberWithBool:") ;
+        (void)no;
+        SEND1(win, "setUserInteractionEnabled:", NULL);
+        SEND1(win, "setHidden:", NULL);
+        gDotWin = win;
+        lg("[dot] window created %p (%.0fx%.0f)", win, b.w, b.h);
+    }
+
+    DshRect fr = { nx * b.w - 15.0, ny * b.h - 15.0, 30.0, 30.0 };
+    if (!gDotView) {
+        void *v = SEND(gGetClass("UIView"), "alloc");
+        v = SEND1R(v, "initWithFrame:", fr);
+        void *red = SEND(gGetClass("UIColor"), "redColor");
+        SEND1(v, "setBackgroundColor:", red);
+        void *layer = SEND(v, "layer");
+        if (layer) SEND1D(layer, "setCornerRadius:", 15.0);
+        SEND1(gDotWin, "addSubview:", v);
+        gDotView = v;
+    } else {
+        SEND1R(gDotView, "setFrame:", fr);
+    }
+    SEND1(gDotWin, "setHidden:", NULL);           /* setHidden:NO */
+    lg("[dot] shown at %.3f,%.3f", nx, ny);
+}
+
+static void hide_dot_impl(void) {
+    if (gDotWin) SEND1(gDotWin, "setHidden:", (void *)1);
+    lg("[dot] hidden");
+}
+
+/* UIKit 必须在主线程，包一层 dispatch_sync_f */
+struct DotReq { double nx, ny; };
+
+static void dot_core(void *p) {
+    struct DotReq *r = (struct DotReq *)p;
+    show_dot_impl(r->nx, r->ny);
+}
+static void nodot_core(void *p) { (void)p; hide_dot_impl(); }
+
+static void on_main(void (*fn)(void *), void *arg) {
+    void *mainQ = (void *)dlsym(RTLD_DEFAULT, "_dispatch_main_q");
+    void (*sync_f)(void *, void *, void (*)(void *)) =
+        (void (*)(void *, void *, void (*)(void *)))dlsym(RTLD_DEFAULT, "dispatch_sync_f");
+    if (mainQ && sync_f) sync_f(mainQ, arg, fn);
+    else fn(arg);
+}
+
+static void show_dot(double nx, double ny) {
+    struct DotReq req = { nx, ny };
+    on_main(dot_core, &req);
+}
+static void hide_dot(void) { on_main(nodot_core, NULL); }
+
 static void handle(int fd) {
     char buf[2048];
     ssize_t n = recv(fd, buf, sizeof(buf)-1, 0);
@@ -265,6 +363,16 @@ static void handle(int fd) {
 
     if (!strstr(buf, kKey)) { reply(fd,403,"Forbidden","text/plain","denied",6); close(fd); return; }
 
+    if (strstr(buf, "GET /dot")) {
+        show_dot(qnum(buf, "x", 0.5), qnum(buf, "y", 0.5));
+        reply(fd, 200, "OK", "text/plain", "dot ok", 6);
+        close(fd); return;
+    }
+    if (strstr(buf, "GET /nodot")) {
+        hide_dot();
+        reply(fd, 200, "OK", "text/plain", "nodot ok", 8);
+        close(fd); return;
+    }
     if (strstr(buf, "GET /tap")) {
         double x = qnum(buf, "x", 0), y = qnum(buf, "y", 0);
         int ms = (int)qnum(buf, "ms", 80);
@@ -324,6 +432,7 @@ static void svc_init(void) {
     FILE *f = fopen("/var/mobile/dsh-min.log", "a");
     if (f) { fprintf(f, "svc-ctor uid=%d pid=%d\n", getuid(), getpid()); fclose(f); }
     touch_init();
+    dot_load();
     pthread_t th; pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
