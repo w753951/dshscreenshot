@@ -39,12 +39,15 @@ jobs:
         run: |
           SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
           [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
-          echo "--- all ld-like files under mf ---"
-          find $HOME/mf -maxdepth 3 \( -name '*ld64*' -o -name 'ld' \) 2>/dev/null | head -20
-          LD64=$(find $HOME/mf -maxdepth 3 -name '*darwin*ld64*' 2>/dev/null | head -1)
-          [ -z "$LD64" ] && LD64=$(find $HOME/mf -maxdepth 3 -name '*ld64*' -type f 2>/dev/null | head -1)
+          echo "--- mf/bin ld entries ---"
+          ls $HOME/mf/bin/ | grep -iE 'ld64|^ld$|darwin' || echo "(none)"
+          LD64=$HOME/mf/bin/x86_64-apple-darwin13.4.0-ld64
+          if [ ! -x "$LD64" ]; then
+            LD64=$HOME/mf/bin/$(ls $HOME/mf/bin/ | grep -i 'ld64' | head -1)
+          fi
           echo "LD64=[$LD64]"
-          [ -z "$LD64" ] && { echo "NO LD64"; exit 1; }
+          [ ! -x "$LD64" ] && { echo "NO LD64 EXEC"; exit 1; }
+          "$LD64" -v 2>&1 | head -2 || true
           $LD64 -v 2>&1 | head -3 || true
           C=/usr/lib/llvm-19/bin/clang
           mkdir -p out
