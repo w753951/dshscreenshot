@@ -252,6 +252,92 @@ static double qnum(const char *req, const char *name, double def) {
     return p ? atof(p + strlen(pat)) : def;
 }
 
+/* 所有可见 UITableView / UICollectionView */
+static NSArray *dsh_all_tables(void) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:w];
+        int g = 0;
+        while (stack.count && g++ < 3000) {
+            UIView *v = stack.lastObject;
+            [stack removeLastObject];
+            if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
+                [out addObject:v];
+            }
+            [stack addObjectsFromArray:v.subviews];
+        }
+    }
+    return out;
+}
+
+/* 列出可见行：section-row | 文本 */
+static NSString *dsh_list(void) {
+    __block NSString *out = @"";
+    void (^work)(void) = ^{
+        NSMutableString *s = [NSMutableString string];
+        for (id tv in dsh_all_tables()) {
+            if ([tv isKindOfClass:[UITableView class]]) {
+                UITableView *t = tv;
+                for (UITableViewCell *c in t.visibleCells) {
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    if (!ip) continue;
+                    [s appendFormat:@"%ld-%ld | %@\n", (long)ip.section, (long)ip.row, dsh_cell_text(c)];
+                }
+            } else {
+                UICollectionView *t = tv;
+                for (UICollectionViewCell *c in t.visibleCells) {
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    if (!ip) continue;
+                    [s appendFormat:@"%ld-%ld | %@\n", (long)ip.section, (long)ip.item, dsh_cell_text(c)];
+                }
+            }
+        }
+        out = s.length ? s : @"(empty)";
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+    return out;
+}
+
+/* 按 indexPath 点一行 */
+static NSString *dsh_tap_row(long sec, long row) {
+    __block NSString *out = @"not-found";
+    void (^work)(void) = ^{
+        NSIndexPath *want = [NSIndexPath indexPathForRow:row inSection:sec];
+        for (id tv in dsh_all_tables()) {
+            if ([tv isKindOfClass:[UITableView class]]) {
+                UITableView *t = tv;
+                if (row < (long)[t numberOfRowsInSection:sec]) {
+                    [t selectRowAtIndexPath:want animated:NO scrollPosition:UITableViewScrollPositionNone];
+                    id<UITableViewDelegate> del = t.delegate;
+                    if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                        [del tableView:t didSelectRowAtIndexPath:want];
+                    }
+                    UITableViewCell *c = [t cellForRowAtIndexPath:want];
+                    out = [NSString stringWithFormat:@"row:%@", c ? dsh_cell_text(c) : @"?"];
+                    return;
+                }
+            } else {
+                UICollectionView *t = tv;
+                NSIndexPath *wantI = [NSIndexPath indexPathForItem:row inSection:sec];
+                if (row < (long)[t numberOfItemsInSection:sec]) {
+                    [t selectItemAtIndexPath:wantI animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+                    id<UICollectionViewDelegate> del = t.delegate;
+                    if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                        [del collectionView:t didSelectItemAtIndexPath:wantI];
+                    }
+                    UICollectionViewCell *c = [t cellForItemAtIndexPath:wantI];
+                    out = [NSString stringWithFormat:@"item:%@", c ? dsh_cell_text(c) : @"?"];
+                    return;
+                }
+            }
+        }
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+    return out;
+}
+
 static void handle(int fd) {
     char buf[1536];
     ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
@@ -259,8 +345,15 @@ static void handle(int fd) {
     buf[n] = 0;
     if (!strstr(buf, kKey)) { reply(fd, 403, "Forbidden", "text/plain", "no key"); close(fd); return; }
 
-    char out[512] = {0};
-    if (strstr(buf, "GET /tap")) {
+    char out[2048] = {0};
+    if (strstr(buf, "GET /list")) {
+        NSString *r = dsh_list();
+        snprintf(out, sizeof(out), "%s", [r UTF8String]);
+    } else if (strstr(buf, "GET /tap_row")) {
+        long s = (long)qnum(buf, "s", 0), r = (long)qnum(buf, "r", 0);
+        NSString *res = dsh_tap_row(s, r);
+        snprintf(out, sizeof(out), "%s", [res UTF8String]);
+    } else if (strstr(buf, "GET /tap")) {
         NSString *r = dsh_tap(qnum(buf, "x", 0.5), qnum(buf, "y", 0.5));
         snprintf(out, sizeof(out), "%s", [r UTF8String]);
     } else if (strstr(buf, "GET /info")) {
