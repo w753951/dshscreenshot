@@ -39,7 +39,10 @@ jobs:
         run: |
           SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
           [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
-          LD64=$(find $HOME/mf -iname '*ld64*' -type f -perm -u+x 2>/dev/null | head -1)
+          echo "--- bin listing ---"
+          ls $HOME/mf/bin/ | head -40
+          LD64=$(ls $HOME/mf/bin/*-ld64 2>/dev/null | head -1)
+          [ -z "$LD64" ] && LD64=$(ls $HOME/mf/bin/ld64 2>/dev/null | head -1)
           echo "LD64=$LD64"
           [ -z "$LD64" ] && { echo "NO LD64 FOUND"; exit 1; }
           $LD64 -v 2>&1 | head -3 || true
