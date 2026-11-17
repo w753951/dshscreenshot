@@ -328,6 +328,31 @@ int main(int argc, char **argv) {
     }
     if (!init_hid()) { fprintf(stderr, "hid init failed\n"); return 4; }
 
+    if (!strcmp(argv[1], "probe")) {
+        const char *libs[] = {
+            "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
+            "/System/Library/PrivateFrameworks/Accessibility.framework/Accessibility",
+            "/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities",
+            "/System/Library/PrivateFrameworks/AXRuntime.framework/AXRuntime",
+            "/System/Library/PrivateFrameworks/UIKitCore.framework/UIKitCore",
+        };
+        for (int i = 0; i < 5; i++) {
+            void *h = dlopen(libs[i], RTLD_LAZY);
+            printf("%-70s -> %p\n", libs[i], h);
+            if (!h) continue;
+            const char *syms[] = {
+                "BKSHIDEventSetDigitizerInfo", "BKSHIDEventSetAttributes",
+                "AXUIElementCreateApplication", "AXUIElementCreateSystemWide",
+                "AXUIElementPerformAction", "AXUIElementCopyAttributeValue",
+                "AXUIElementCopyElementAtPosition", "_AXUIElementCreateWithRemoteToken",
+            };
+            for (int j = 0; j < 8; j++) {
+                void *s = dlsym(h, syms[j]);
+                if (s) printf("   HIT %-40s %p\n", syms[j], s);
+            }
+        }
+        return 0;
+    }
     if (!strcmp(argv[1], "info")) {
         printf("client=%p finger=%p digitizer=%p dispatch=%p key=%p\n",
                (void *)gClient, (void *)pFinger, (void *)pDigitizer, (void *)pDispatch, (void *)pKey);
