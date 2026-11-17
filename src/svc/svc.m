@@ -298,38 +298,76 @@ static DshRect dot_bounds(void) {
 
 /* 在 (nx, ny) 归一化位置显示一个红点；保持 1.6 秒后自动隐藏 */
 #define R 18.0   /* 圆点半径（pt），小而精准 */
+
+/* 窗口只占圆点大小，避免挡住所层；用户可以用手指拖它 */
+static void dsh_pan(void *self, void *cmd, void *gr) {
+    (void)cmd;
+    if (!gMsg || !gSel) return;
+    void *window = SEND(self, "window");
+    void *superview = window ? SEND(window, "superview") : NULL;
+    DshRect t = ((DshRect (*)(void *, void *, void *))gMsg)(gr, gSel("translationInView:"), superview);
+    DshRect f = ((DshRect (*)(void *, void *))gMsg)(self, gSel("frame"));
+    f.x += t.x; f.y += t.y;
+    SEND1R(self, "setFrame:", f);
+    void *zero = SEND(gGetClass("NSValue"), "valueWithCGPoint:");
+    (void)zero;
+    ((void (*)(void *, void *, DshRect, void *))gMsg)(gr, gSel("setTranslation:inView:"), (DshRect){0,0,0,0}, superview);
+    if (window) SEND1R(window, "setFrame:", f);
+    lg("[dot] dragged to %.0f,%.0f", f.x, f.y);
+}
+
 static void show_dot_impl(double nx, double ny) {
     if (!gMsg || !gSel || !gGetClass) { lg("[dot] no objc"); return; }
     DshRect b = dot_bounds();
+    DshRect fr = { nx * b.w - R, ny * b.h - R, R * 2.0, R * 2.0 };
 
     if (!gDotWin) {
-        DshRect full = {0, 0, b.w, b.h};
         void *win = SEND(gGetClass("UIWindow"), "alloc");
-        win = SEND1R(win, "initWithFrame:", full);
+        win = SEND1R(win, "initWithFrame:", fr);
         if (!win) { lg("[dot] no window"); return; }
         SEND1D(win, "setWindowLevel:", 10000001.0);
-        void *no = SEND(gGetClass("NSNumber"), "numberWithBool:") ;
-        (void)no;
-        SEND1(win, "setUserInteractionEnabled:", NULL);
         SEND1(win, "setHidden:", NULL);
         gDotWin = win;
-        lg("[dot] window created %p (%.0fx%.0f)", win, b.w, b.h);
+        lg("[dot] window created %p", win);
+    } else {
+        SEND1R(gDotWin, "setFrame:", fr);
     }
 
-    DshRect fr = { nx * b.w - R, ny * b.h - R, R * 2.0, R * 2.0 };
     if (!gDotView) {
         void *v = SEND(gGetClass("UIView"), "alloc");
-        v = SEND1R(v, "initWithFrame:", fr);
+        DshRect local = { 0, 0, R * 2.0, R * 2.0 };
+        v = SEND1R(v, "initWithFrame:", local);
         void *red = SEND(gGetClass("UIColor"), "redColor");
         SEND1(v, "setBackgroundColor:", red);
         void *layer = SEND(v, "layer");
         if (layer) { SEND1D(layer, "setCornerRadius:", R); SEND1D(layer, "setBorderWidth:", 2.5); }
+
+        /* 让圆点能被手指拖动：动态造一个带 pan 手势的类 */
+        void *(*allocClassPair)(void *, const char *, size_t) = dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
+        unsigned char (*addMethod)(void *, void *, void *, const char *) = dlsym(RTLD_DEFAULT, "class_addMethod");
+        void (*regPair)(void *) = dlsym(RTLD_DEFAULT, "objc_registerClassPair");
+        if (allocClassPair && addMethod && regPair) {
+            void *cls = allocClassPair(gGetClass("UIView"), "DshDotView", 0);
+            if (cls) {
+                addMethod(cls, gSel("dshPan:"), (void *)dsh_pan, "v@:@");
+                regPair(cls);
+                void *dv = SEND(cls, "alloc");
+                dv = SEND1R(dv, "initWithFrame:", local);
+                if (dv) v = dv;
+                lg("[dot] draggable class installed");
+            }
+        }
+
         SEND1(gDotWin, "addSubview:", v);
         gDotView = v;
-    } else {
-        SEND1R(gDotView, "setFrame:", fr);
+
+        void *pan = SEND(gGetClass("UIPanGestureRecognizer"), "alloc");
+        pan = ((void *(*)(void *, void *, void *, void *))gMsg)(pan, gSel("initWithTarget:action:"), v, gSel("dshPan:"));
+        if (pan) SEND1(v, "addGestureRecognizer:", pan);
+        SEND1(gDotWin, "setUserInteractionEnabled:", (void *)1);
+        SEND1(v, "setUserInteractionEnabled:", (void *)1);
     }
-    SEND1(gDotWin, "setHidden:", NULL);           /* setHidden:NO */
+    SEND1(gDotWin, "setHidden:", NULL);
     lg("[dot] shown at %.3f,%.3f", nx, ny);
 }
 
