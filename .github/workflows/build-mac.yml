@@ -1,0 +1,40 @@
+name: Build probe on macOS (Apple ld64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Compile probe arm64e with Apple ld64
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p out
+          for ARCH in arm64 arm64e; do
+            xcrun --sdk iphoneos clang -arch $ARCH -isysroot "$SDK" \
+              -miphoneos-version-min=15.0 \
+              -dynamiclib -fobjc-arc -O2 \
+              -framework Foundation \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshMin.dylib \
+              -o out/DshMin.$ARCH.dylib \
+              src/probe/probe.m
+            echo "$ARCH built"
+          done
+          lipo -create out/DshMin.arm64.dylib out/DshMin.arm64e.dylib -output out/DshMin.dylib
+          lipo -info out/DshMin.dylib
+          od -An -tx4 -N 52 out/DshMin.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-mac
+          path: out/
+          retention-days: 7
