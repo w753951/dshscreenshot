@@ -47,10 +47,10 @@ jobs:
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshAppHook.dylib \
               -o out/DshAppHook.$ARCH.dylib src/apphook/apphook.m && echo "$ARCH OK" || echo "$ARCH FAILED"
           done
-          # 设备要求 cpusubtype = 0x80000002（arm64e + PAC ABI v2）
-          for f in out/*.dylib; do printf '\x00\x00\x00\x00' | dd of=$f bs=1 seek=8 conv=notrunc; done
           ls -la out/
           for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
+          echo "=== pacibsp 统计（arm64e 应 >0，arm64 应 0）==="
+          for f in out/*.dylib; do printf "%s: " "$f"; od -An -v -tx1 $f | tr -s ' \n' '\n' | grep -v '^$' | paste -d' ' - - - - | grep -c "7f 23 03 d5" || true; done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -58,14 +58,15 @@ jobs:
           path: out/
           retention-days: 7
 
-      - name: publish dist
+      - name: publish dist (arm64 slice — 这台机 libhooker 只吃无 PAC 的 arm64)
         run: |
           set -e
           mkdir -p dist
+          cp out/DshAppHook.arm64.dylib dist/DshAppHook.arm64.dylib
           cp out/DshAppHook.arm64e.dylib dist/DshAppHook.arm64e.dylib
           cp src/apphook/apphook.m dist/apphook.m
           git config user.name "dsh-bot"
           git config user.email "bot@dsh.local"
           git add -f dist
-          git commit -m "dist: apphook arm64e build $(date -u +%Y%m%d%H%M%S)" || true
+          git commit -m "dist: apphook arm64+arm64e build $(date -u +%Y%m%d%H%M%S)" || true
           git push
