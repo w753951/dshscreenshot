@@ -58,11 +58,15 @@ static void handle_client(int fd) {
 
 static void *server_thread(void *arg) {
     (void)arg;
+    // 关键：等 SpringBoard 启动完成，避免在 dyld 初始化期间 dlopen 导致 load 重入
+    sleep(10);
     lg("[svc] thread start uid=%d pid=%d", getuid(), getpid());
     probe_syms();
+    lg("[svc] after probe");
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { lg("[svc] socket errno=%d", errno); return NULL; }
+    lg("[svc] socket fd=%d errno=%d", fd, errno);
+    if (fd < 0) { return NULL; }
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
