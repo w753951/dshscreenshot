@@ -72,7 +72,7 @@ static BOOL dsh_fire_gesture(UIGestureRecognizer *g) {
     if (!g) return NO;
     Ivar iv = class_getInstanceVariable([UIGestureRecognizer class], "_targets");
     if (!iv) return NO;
-    NSArray *targets = (__bridge NSArray *)object_getIvar(g, iv);
+    NSArray *targets = (NSArray *)object_getIvar((id)g, iv);
     if (![targets isKindOfClass:[NSArray class]] || targets.count == 0) return NO;
 
     for (id t in targets) {
@@ -81,7 +81,7 @@ static BOOL dsh_fire_gesture(UIGestureRecognizer *g) {
         Ivar ta = class_getInstanceVariable(tc, "_action");
         if (!tt || !ta) continue;
         id target = object_getIvar(t, tt);
-        SEL action = (SEL)object_getIvar(t, ta);
+        SEL action = (SEL)(void *)object_getIvar(t, ta);
         if (target && action && [target respondsToSelector:action]) {
             ((void (*)(id, SEL, id))objc_msgSend)(target, action, g);
             lg(@"fired gesture %@ on %@ -> %@", NSStringFromClass([g class]),
