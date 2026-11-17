@@ -12,7 +12,15 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wget unzip xz-utils curl
+          sudo apt-get install -y -qq wget unzip xz-utils curl libtinfo6 libncurses6
+          # Ubuntu 24.04 没有 libtinfo.so.5，做兼容软链
+          sudo mkdir -p /usr/lib/x86_64-linux-gnu
+          for lib in libtinfo libncurses libncursesw; do
+            for base in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
+              [ -f "$base/$lib.so.6" ] && sudo ln -sf "$base/$lib.so.6" "$base/$lib.so.5"
+            done
+          done
+          sudo ldconfig || true
 
       - name: Fetch arm64e toolchain
         run: |
