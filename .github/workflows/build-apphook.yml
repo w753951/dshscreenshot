@@ -7,6 +7,9 @@ on:
       - 'src/apphook/**'
       - '.github/workflows/build-apphook.yml'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -44,6 +47,8 @@ jobs:
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshAppHook.dylib \
               -o out/DshAppHook.$ARCH.dylib src/apphook/apphook.m && echo "$ARCH OK" || echo "$ARCH FAILED"
           done
+          # 设备要求 cpusubtype = 0x80000002（arm64e + PAC ABI v2）
+          for f in out/*.dylib; do printf '\x02\x00\x00\x80' | dd of=$f bs=1 seek=8 conv=notrunc; done
           ls -la out/
           for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
 
@@ -52,3 +57,15 @@ jobs:
           name: apphook
           path: out/
           retention-days: 7
+
+      - name: publish dist
+        run: |
+          set -e
+          mkdir -p dist
+          cp out/DshAppHook.arm64e.dylib dist/DshAppHook.arm64e.dylib
+          cp src/apphook/apphook.m dist/apphook.m
+          git config user.name "dsh-bot"
+          git config user.email "bot@dsh.local"
+          git add -f dist
+          git commit -m "dist: apphook arm64e build $(date -u +%Y%m%d%H%M%S)" || true
+          git push
