@@ -341,7 +341,7 @@ static NSString *dsh_tap_row(long sec, long row) {
 #pragma mark - 按文本直接找行（不依赖坐标、不依赖行号）
 
 /* 列出所有可见行里文本匹配的行：每行 "序号|section:row|文本" */
-static NSString *dsh_find_rows(NSString *needle) {
+static NSString *dsh_find_rows(NSString *needle, BOOL tail) {
     __block NSString *out = @"";
     onMain(^{
         NSMutableString *s = [NSMutableString string];
@@ -351,7 +351,7 @@ static NSString *dsh_find_rows(NSString *needle) {
                 UITableView *t = (UITableView *)tv;
                 for (UITableViewCell *c in t.visibleCells) {
                     NSString *txt = dsh_cell_text(c);
-                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    if (tail ? ![txt hasSuffix:needle] : ([txt rangeOfString:needle].location == NSNotFound)) continue;
                     NSIndexPath *ip = [t indexPathForCell:c];
                     [s appendFormat:@"%d|%ld:%ld|%@\n", idx++, (long)ip.section, (long)ip.row, txt];
                 }
@@ -359,7 +359,7 @@ static NSString *dsh_find_rows(NSString *needle) {
                 UICollectionView *t = (UICollectionView *)tv;
                 for (UICollectionViewCell *c in t.visibleCells) {
                     NSString *txt = dsh_cell_text(c);
-                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    if (tail ? ![txt hasSuffix:needle] : ([txt rangeOfString:needle].location == NSNotFound)) continue;
                     NSIndexPath *ip = [t indexPathForCell:c];
                     [s appendFormat:@"%d|%ld:%ld|%@\n", idx++, (long)ip.section, (long)ip.item, txt];
                 }
@@ -371,7 +371,7 @@ static NSString *dsh_find_rows(NSString *needle) {
 }
 
 /* 点第 skip 个文本匹配的行：直接对该 cell 走 delegate，绕开坐标和列表刷新 */
-static NSString *dsh_tap_text(NSString *needle, int skip) {
+static NSString *dsh_tap_text(NSString *needle, int skip, BOOL tail) {
     __block NSString *out = @"not-found";
     onMain(^{
         int idx = 0;
@@ -380,7 +380,7 @@ static NSString *dsh_tap_text(NSString *needle, int skip) {
                 UITableView *t = (UITableView *)tv;
                 for (UITableViewCell *c in t.visibleCells) {
                     NSString *txt = dsh_cell_text(c);
-                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    if (tail ? ![txt hasSuffix:needle] : ([txt rangeOfString:needle].location == NSNotFound)) continue;
                     if (idx++ < skip) continue;
                     NSIndexPath *ip = [t indexPathForCell:c];
                     CGRect r = [c convertRect:c.bounds toView:nil];
@@ -397,7 +397,7 @@ static NSString *dsh_tap_text(NSString *needle, int skip) {
                 UICollectionView *t = (UICollectionView *)tv;
                 for (UICollectionViewCell *c in t.visibleCells) {
                     NSString *txt = dsh_cell_text(c);
-                    if ([txt rangeOfString:needle].location == NSNotFound) continue;
+                    if (tail ? ![txt hasSuffix:needle] : ([txt rangeOfString:needle].location == NSNotFound)) continue;
                     if (idx++ < skip) continue;
                     NSIndexPath *ip = [t indexPathForCell:c];
                     CGRect r = [c convertRect:c.bounds toView:nil];
@@ -721,9 +721,9 @@ static void handle(int fd) {
     } else if (strstr(buf, "GET /scroll")) {
         res = dsh_scroll(qnum(buf, "dy", 600));
     } else if (strstr(buf, "GET /find")) {
-        res = dsh_find_rows([NSString stringWithUTF8String:qstr(buf, "text")]);
+        res = dsh_find_rows([NSString stringWithUTF8String:qstr(buf, "text")], qnum(buf, "tail", 0) != 0);
     } else if (strstr(buf, "GET /tap_text")) {
-        res = dsh_tap_text([NSString stringWithUTF8String:qstr(buf, "text")], (int)qnum(buf, "skip", 0));
+        res = dsh_tap_text([NSString stringWithUTF8String:qstr(buf, "text")], (int)qnum(buf, "skip", 0), qnum(buf, "tail", 0) != 0);
     } else if (strstr(buf, "GET /tap_row")) {
         long s = (long)qnum(buf, "s", 0), r = (long)qnum(buf, "r", 0);
         res = dsh_tap_row(s, r);
