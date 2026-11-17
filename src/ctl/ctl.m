@@ -328,6 +328,49 @@ int main(int argc, char **argv) {
     }
     if (!init_hid()) { fprintf(stderr, "hid init failed\n"); return 4; }
 
+    if (!strcmp(argv[1], "ax")) {
+        /* 用辅助功能（VoiceOver 那套）在屏幕坐标 (pt) 处按下元素 */
+        void *h = dlopen("/System/Library/PrivateFrameworks/AccessibilityUtilities.framework/AccessibilityUtilities", RTLD_LAZY);
+        if (!h) { printf("no accessibility framework\n"); return 1; }
+        void *(*pCreateSys)(void) = dlsym(h, "AXUIElementCreateSystemWide");
+        int (*pAtPos)(void *, float, float, void **) = dlsym(h, "AXUIElementCopyElementAtPosition");
+        int (*pPerform)(void *, CFStringRef) = dlsym(h, "AXUIElementPerformAction");
+        int (*pCopyAttr)(void *, CFStringRef, CFTypeRef *) = dlsym(h, "AXUIElementCopyAttributeValue");
+        if (!pCreateSys || !pAtPos || !pPerform) { printf("ax symbols missing\n"); return 2; }
+
+        double px = atof(argv[2]), py = atof(argv[3]);
+        void *sys = pCreateSys();
+        void *elem = NULL;
+        int rc = pAtPos(sys, (float)px, (float)py, &elem);
+        printf("ax copyElementAtPosition(%.0f,%.0f) rc=%d elem=%p\n", px, py, rc, elem);
+        if (rc != 0 || !elem) return 3;
+
+        if (pCopyAttr) {
+            CFTypeRef label = NULL, role = NULL, title = NULL;
+            pCopyAttr(elem, CFSTR("AXLabel"), &label);
+            pCopyAttr(elem, CFSTR("AXRole"), &role);
+            pCopyAttr(elem, CFSTR("AXTitle"), &title);
+            char buf[256] = {0};
+            if (role) {
+                CFStringGetCString((CFStringRef)role, buf, sizeof(buf), kCFStringEncodingUTF8);
+                printf("  role=%s\n", buf);
+            }
+            if (title) {
+                buf[0] = 0;
+                CFStringGetCString((CFStringRef)title, buf, sizeof(buf), kCFStringEncodingUTF8);
+                printf("  title=%s\n", buf);
+            }
+            if (label) {
+                buf[0] = 0;
+                CFStringGetCString((CFStringRef)label, buf, sizeof(buf), kCFStringEncodingUTF8);
+                printf("  label=%s\n", buf);
+            }
+        }
+
+        int rc2 = pPerform(elem, CFSTR("AXPress"));
+        printf("ax performAction AXPress rc=%d\n", rc2);
+        return 0;
+    }
     if (!strcmp(argv[1], "probe")) {
         const char *libs[] = {
             "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
