@@ -362,16 +362,17 @@ static DshRect dot_bounds(void) {
 static void dsh_pan(void *self, void *cmd, void *gr) {
     (void)cmd;
     if (!gMsg || !gSel) return;
-    void *window = SEND(self, "window");
-    void *superview = window ? SEND(window, "superview") : NULL;
-    DshRect t = ((DshRect (*)(void *, void *, void *))gMsg)(gr, gSel("translationInView:"), superview);
-    DshRect f = ((DshRect (*)(void *, void *))gMsg)(self, gSel("frame"));
-    f.x += t.x; f.y += t.y;
-    SEND1R(self, "setFrame:", f);
-    void *zero = SEND(gGetClass("NSValue"), "valueWithCGPoint:");
-    (void)zero;
-    ((void (*)(void *, void *, DshRect, void *))gMsg)(gr, gSel("setTranslation:inView:"), (DshRect){0,0,0,0}, superview);
-    if (window) SEND1R(window, "setFrame:", f);
+    void *win = SEND(self, "window");
+    void *host = win ? win : self;
+
+    /* 只移动承载窗口，视图自身保持 (0,0)；translation 相对窗口自身坐标系 */
+    DshRect t = ((DshRect (*)(void *, void *, void *))gMsg)(gr, gSel("translationInView:"), win);
+    DshRect f = ((DshRect (*)(void *, void *))gMsg)(host, gSel("frame"));
+    f.x += t.x;
+    f.y += t.y;
+    SEND1R(host, "setFrame:", f);
+    ((void (*)(void *, void *, DshRect, void *))gMsg)(gr, gSel("setTranslation:inView:"),
+                                                      (DshRect){0, 0, 0, 0}, win);
     lg("[dot] dragged to %.0f,%.0f", f.x, f.y);
 }
 
