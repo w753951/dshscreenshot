@@ -16,7 +16,7 @@ jobs:
       - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget unzip xz-utils curl libtinfo5 libncurses5 ldid || true
+          sudo apt-get install -y wget unzip xz-utils curl libtinfo5 libncurses5
 
       - name: toolchain
         run: |
