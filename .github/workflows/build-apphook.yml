@@ -1,11 +1,14 @@
-name: build-dshauto
+name: Build apphook (in-process UI tap)
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - 'DshAuto/DshAuto.m'
-      - '.github/workflows/build-dshauto.yml'
+      - 'src/apphook/**'
+      - '.github/workflows/build-apphook.yml'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,35 +16,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 依赖
-        run: sudo apt-get update && sudo apt-get install -y wget unzip xz-utils curl libtinfo5 libncurses5
-
-      - name: 工具链（sbingner arm64e clang-10）
+      - name: deps
         run: |
-          URL=https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
-          curl -L -o tc.tar.lzma "$URL"
-          mkdir -p "$HOME/tc" && tar xf tc.tar.lzma -C "$HOME/tc"
+          sudo apt-get update
+          sudo apt-get install -y wget unzip xz-utils curl libtinfo5 libncurses5
 
-      - name: iOS 13.7 SDK（必须，新 SDK 的 tbd clang-10 不认）
+      - name: toolchain
+        run: |
+          set -e
+          curl -L -o tc.tar.lzma https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          mkdir -p $HOME/tc && tar xf tc.tar.lzma -C $HOME/tc
+
+      - name: sdk
         run: |
           wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
           unzip -q sdks.zip
 
-      - name: 编译 arm64e
+      - name: compile
         run: |
-          C="$HOME/tc/ios-arm64e-clang-toolchain/bin/clang"
-          SDK="$PWD/sdks-master/iPhoneOS13.7.sdk"
+          set -e
+          C=$HOME/tc/ios-arm64e-clang-toolchain/bin/clang
+          SDK=$PWD/sdks-master/iPhoneOS13.7.sdk
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | sort -V | head -1)
           mkdir -p out
-          "$C" -target arm64e-apple-ios15.0 -isysroot "$SDK" \
-             -dynamiclib -O2 -fobjc-arc -fblocks -DNDEBUG \
-             -framework Foundation -framework UIKit -framework CoreGraphics \
-             -install_name /Library/MobileSubstrate/DynamicLibraries/DshAuto.dylib \
-             -o out/DshAuto.dylib DshAuto/DshAuto.m
-          # 设备要求 cpusubtype = 0x80000002（arm64e + PAC ABI v2）
-          printf '\x02\x00\x00\x80' | dd of=out/DshAuto.dylib bs=1 seek=8 conv=notrunc
+          for ARCH in arm64 arm64e; do
+            $C -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
+              -dynamiclib -O2 -fobjc-arc -fblocks -DNDEBUG \
+              -framework Foundation -framework UIKit -framework CoreGraphics -framework CoreGraphics \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshAppHook.dylib \
+              -o out/DshAppHook.$ARCH.dylib src/apphook/apphook.m && echo "$ARCH OK" || echo "$ARCH FAILED"
+          done
           ls -la out/
+          for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DshAuto.dylib
-          path: out/DshAuto.dylib
+          name: apphook
+          path: out/
+          retention-days: 7
+
+      - name: publish dist
+        continue-on-error: true
+        run: |
+          mkdir -p dist
+          cp out/DshAppHook.arm64.dylib dist/DshAppHook.arm64.dylib || true
+          cp out/DshAppHook.arm64e.dylib dist/DshAppHook.arm64e.dylib || true
+          cp src/apphook/apphook.m dist/apphook.m || true
+          git config user.name "dsh-bot"
+          git config user.email "bot@dsh.local"
+          git add -f dist
+          git commit -m "dist: apphook $(date -u +%Y%m%d%H%M%S)" || true
+          git push || true
