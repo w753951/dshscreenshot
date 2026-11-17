@@ -1,0 +1,56 @@
+name: Build ZXTouch (control experiment)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make curl wget unzip xz-utils libtinfo5 libncurses5
+
+      - name: toolchain
+        run: |
+          set -e
+          curl -L -o tc.tar.lzma https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          mkdir -p "$HOME/tc" && tar xf tc.tar.lzma -C "$HOME/tc"
+          ls "$HOME/tc"
+
+      - name: theos
+        run: |
+          set -e
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          ls "$HOME/theos" | head -20
+
+      - name: sdk
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+          ls "$HOME/theos/sdks" | head
+
+      - name: source
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/Epic0001/zxtouchrootless.git src
+          ls src | head -20
+
+      - name: build
+        run: |
+          set -e
+          export THEOS="$HOME/theos"
+          export PATH="$HOME/tc/ios-arm64e-clang-toolchain/bin:$PATH"
+          export THEOS_PACKAGE_SCHEME=rootless
+          cd src/pccontrol
+          make package FINALPACKAGE=1 2>&1 | tail -40
+          find . -name "*.deb" -maxdepth 3
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zxtouch-deb
+          path: src/pccontrol/**/*.deb
+          retention-days: 5
+          if-no-files-found: warn
