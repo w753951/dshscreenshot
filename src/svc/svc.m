@@ -44,17 +44,47 @@ static void capture_core(void *p) {
     lg("[core] image=%p", img);
     if (!img) return;
 
-    void *data = c->pngRep(img);
-    lg("[core] nsdata=%p", data);
-    if (!data) return;
+    /* 不走 UIImagePNGRepresentation（会崩），改为取 CGImage + ImageIO 编码 */
+    void *libobjc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_LAZY);
+    void *(*msgSend)(void*, void*, ...) = libobjc ? dlsym(libobjc, "objc_msgSend") : NULL;
+    void *(*selReg)(const char*) = libobjc ? dlsym(libobjc, "sel_registerName") : NULL;
+    lg("[core] objc msgSend=%p sel=%p", (void*)msgSend, (void*)selReg);
+    if (!msgSend || !selReg) return;
 
-    void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
-    const void *(*getBytes)(void*) = cf ? dlsym(cf, "CFDataGetBytePtr") : NULL;
-    long (*getLen)(void*)          = cf ? dlsym(cf, "CFDataGetLength") : NULL;
-    if (!getBytes || !getLen) { lg("[core] CFData syms missing"); return; }
+    void *cgImage = msgSend(img, selReg("CGImage"));
+    lg("[core] cgImage=%p", cgImage);
+    if (!cgImage) return;
 
-    long len = getLen(data);
-    const void *b = getBytes(data);
+    void *cf  = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
+    void *io  = dlopen("/System/Library/Frameworks/ImageIO.framework/ImageIO", RTLD_LAZY);
+    lg("[core] cf=%p io=%p", cf, io);
+    if (!cf || !io) return;
+
+    typedef void *CFDataRef;
+    CFDataRef (*dataNew)(const void*, long)          = dlsym(cf, "CFDataCreateMutable");
+    const void *(*dataBytes)(CFDataRef)              = dlsym(cf, "CFDataGetBytePtr");
+    long (*dataLen)(CFDataRef)                       = dlsym(cf, "CFDataGetLength");
+    void *(*strCreate)(const void*, const char*, unsigned) = dlsym(cf, "CFStringCreateWithCString");
+    void *(*destNew)(CFDataRef, void*, unsigned long, const void*) = dlsym(io, "CGImageDestinationCreateWithData");
+    void (*destAdd)(void*, void*, const void*)       = dlsym(io, "CGImageDestinationAddImage");
+    int  (*destFinal)(void*)                         = dlsym(io, "CGImageDestinationFinalize");
+    lg("[core] dataNew=%p destNew=%p destAdd=%p destFinal=%p",
+       (void*)dataNew, (void*)destNew, (void*)destAdd, (void*)destFinal);
+    if (!dataNew || !dataBytes || !dataLen || !strCreate || !destNew || !destAdd || !destFinal) return;
+
+    CFDataRef data = dataNew(NULL, 0);
+    void *pngType = strCreate(NULL, "public.png", 0x08000100);
+    void *dest = destNew(data, pngType, 1, NULL);
+    lg("[core] data=%p dest=%p", (void*)data, dest);
+    if (!dest) return;
+
+    destAdd(dest, cgImage, NULL);
+    int ok = destFinal(dest);
+    lg("[core] finalize=%d", ok);
+    if (!ok) return;
+
+    long len = dataLen(data);
+    const void *b = dataBytes(data);
     lg("[core] png len=%ld", len);
     if (len <= 8 || !b) return;
 
