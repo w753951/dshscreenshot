@@ -1,18 +1,36 @@
-// probe.m —— 注入验证（纯 C 函数体，避免 Foundation 早调用崩溃）
+// probe.m —— 二分定位：纯线程，不 dlopen，不做任何间接调用之外的事
 #include <stdio.h>
 #include <unistd.h>
-#include <time.h>
-#include <string.h>
+#include <pthread.h>
+#include <stdarg.h>
 
-__attribute__((constructor))
-static void dsh_probe_init(void) {
+static void plog(const char *fmt, ...) {
     FILE *f = fopen("/var/mobile/dsh-min.log", "a");
     if (!f) return;
-    time_t t = time(NULL);
-    struct tm tmv;
-    localtime_r(&t, &tmv);
-    fprintf(f, "%02d:%02d:%02d uid=%d pid=%d ctor-ok\n",
-            tmv.tm_hour, tmv.tm_min, tmv.tm_sec, getuid(), getpid());
-    fflush(f);
-    fclose(f);
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f); fclose(f);
+}
+
+static void *worker(void *arg) {
+    (void)arg;
+    sleep(3);
+    plog("[worker] alive tid-in-thread");
+    for (int i = 0; i < 6; i++) {
+        sleep(5);
+        plog("[worker] tick %d", i);
+    }
+    plog("[worker] done");
+    return NULL;
+}
+
+__attribute__((constructor))
+static void probe_init(void) {
+    plog("ctor uid=%d pid=%d", getuid(), getpid());
+    pthread_t th;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&th, &at, worker, NULL);
+    plog("pthread_create rc=%d", rc);
+    pthread_attr_destroy(&at);
 }
