@@ -28,7 +28,10 @@ jobs:
       - name: sdk
         run: |
           set -e
-          git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+          if [ ! -d "$HOME/theos/sdks/iPhoneOS14.5.sdk" ] && [ ! -d "$HOME/theos/sdks/iPhoneOS15.0.sdk" ]; then
+            rm -rf "$HOME/theos/sdks"
+            git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+          fi
           ls "$HOME/theos/sdks" | head
 
       - name: source
