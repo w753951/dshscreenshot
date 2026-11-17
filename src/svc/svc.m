@@ -1,8 +1,8 @@
 // svc.m —— SpringBoard 截图服务（真 arm64e）
 // GET http://127.0.0.1:47191/capture?key=dsh-go-screen-v1 -> image/png
 //
-// 抓屏用 UIKit 私有 C 函数 __UICreateScreenUIImageWithRotation
-// （与越狱插件 Snapper3 完全相同的 API，已确认该符号存在于本机）
+// 抓屏：UIKit 私有函数 _UICreateScreenUIImageWithRotation（Snapper3 同款）
+// 关键：整个 UIKit 调用必须放主线程，用 dispatch_sync_f（函数指针版，不需要 block）
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,46 +27,76 @@ static void lg(const char *fmt, ...) {
     fputc('\n', f); fclose(f);
 }
 
-/* 取屏幕 PNG（malloc，调用方 free） */
-static unsigned char *capture_png(size_t *outLen) {
-    *outLen = 0;
+/* ---- 在主线程上执行的抓屏核心 ---- */
+struct CapCtx {
+    unsigned char *out;
+    size_t len;
+    void *uikit;
+    void *(*create)(int);
+    void *(*pngRep)(void *);
+};
 
-    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
-    lg("[cap] UIKit=%p", uikit);
-    if (!uikit) return NULL;
+static void capture_core(void *p) {
+    struct CapCtx *c = (struct CapCtx *)p;
+    c->out = NULL; c->len = 0;
 
-    void *(*createScreen)(int)  = dlsym(uikit, "__UICreateScreenUIImageWithRotation");
-    void *(*createScreen2)(int) = dlsym(uikit, "_UICreateScreenUIImageWithRotation");
-    void *(*pngRep)(void *)     = dlsym(uikit, "UIImagePNGRepresentation");
-    lg("[cap] createScreen=%p alt=%p pngRep=%p",
-       (void*)createScreen, (void*)createScreen2, (void*)pngRep);
+    void *img = c->create(1);
+    lg("[core] image=%p", img);
+    if (!img) return;
 
-    void *img = NULL;
-    if (createScreen)       img = createScreen(1);
-    else if (createScreen2) img = createScreen2(1);
-    lg("[cap] image=%p", img);
-    if (!img) { lg("[cap] no image"); return NULL; }
-    if (!pngRep) { lg("[cap] no pngRep"); return NULL; }
-
-    void *data = pngRep(img);
-    lg("[cap] nsdata=%p", data);
-    if (!data) { lg("[cap] no data"); return NULL; }
+    void *data = c->pngRep(img);
+    lg("[core] nsdata=%p", data);
+    if (!data) return;
 
     void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
     const void *(*getBytes)(void*) = cf ? dlsym(cf, "CFDataGetBytePtr") : NULL;
     long (*getLen)(void*)          = cf ? dlsym(cf, "CFDataGetLength") : NULL;
-    if (!getBytes || !getLen) { lg("[cap] CFData syms missing"); return NULL; }
+    if (!getBytes || !getLen) { lg("[core] CFData syms missing"); return; }
 
     long len = getLen(data);
     const void *b = getBytes(data);
-    lg("[cap] png len=%ld", len);
-    if (len <= 8 || !b) return NULL;
+    lg("[core] png len=%ld", len);
+    if (len <= 8 || !b) return;
 
-    unsigned char *out = malloc((size_t)len);
-    if (!out) return NULL;
-    memcpy(out, b, (size_t)len);
-    *outLen = (size_t)len;
-    return out;
+    unsigned char *buf = malloc((size_t)len);
+    if (!buf) return;
+    memcpy(buf, b, (size_t)len);
+    c->out = buf;
+    c->len = (size_t)len;
+}
+
+static unsigned char *capture_png(size_t *outLen) {
+    *outLen = 0;
+
+    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
+    if (!uikit) { lg("[cap] no UIKit"); return NULL; }
+
+    void *(*create)(int) = dlsym(uikit, "_UICreateScreenUIImageWithRotation");
+    if (!create) create = dlsym(uikit, "__UICreateScreenUIImageWithRotation");
+    void *(*pngRep)(void *) = dlsym(uikit, "UIImagePNGRepresentation");
+    lg("[cap] create=%p pngRep=%p", (void*)create, (void*)pngRep);
+    if (!create || !pngRep) return NULL;
+
+    struct CapCtx ctx;
+    ctx.out = NULL; ctx.len = 0; ctx.uikit = uikit;
+    ctx.create = create; ctx.pngRep = pngRep;
+
+    /* 主队列 + dispatch_sync_f */
+    void *mainQ = (void *)dlsym(RTLD_DEFAULT, "_dispatch_main_q");
+    void (*sync_f)(void*, void*, void (*)(void*)) =
+        (void (*)(void*, void*, void (*)(void*)))dlsym(RTLD_DEFAULT, "dispatch_sync_f");
+    lg("[cap] mainQ=%p sync_f=%p", mainQ, (void*)sync_f);
+
+    if (mainQ && sync_f) {
+        sync_f(mainQ, &ctx, capture_core);
+        lg("[cap] ran on main queue");
+    } else {
+        capture_core(&ctx);
+        lg("[cap] ran on caller thread");
+    }
+
+    *outLen = ctx.len;
+    return ctx.out;
 }
 
 static void reply(int fd, int code, const char *reason, const char *ctype,
