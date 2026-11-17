@@ -194,6 +194,21 @@ static void *iofind(const char *n) {
     return NULL;
 }
 
+static void *xGetSenderID = NULL, *xGetType = NULL, *xSetSenderID = NULL;
+static void *xRegisterCb = NULL, *xScheduleRL = NULL;
+static uint64_t gSenderId = 0;
+
+static void sender_cb(void *target, void *refcon, void *service, void *event) {
+    (void)target; (void)refcon; (void)service;
+    if (!xGetType || !xGetSenderID || !event) return;
+    if (((int (*)(void *))xGetType)(event) != 11) return;
+    uint64_t sid = ((uint64_t (*)(void *))xGetSenderID)(event);
+    if (sid && sid != gSenderId) {
+        gSenderId = sid;
+        lg("[touch] senderID=0x%llx", (unsigned long long)sid);
+    }
+}
+
 static void touch_init(void) {
     xCreate    = (void *)iofind("IOHIDEventSystemClientCreate");
     xSetProp   = (void *)iofind("IOHIDEventSystemClientSetProperty");
@@ -201,33 +216,65 @@ static void touch_init(void) {
     xFinger    = (void *)iofind("IOHIDEventCreateDigitizerFingerEvent");
     xDigitizer = (void *)iofind("IOHIDEventCreateDigitizerEvent");
     xAppend    = (void *)iofind("IOHIDEventAppendEvent");
+    xGetSenderID = (void *)iofind("IOHIDEventGetSenderID");
+    xGetType     = (void *)iofind("IOHIDEventGetType");
+    xSetSenderID = (void *)iofind("IOHIDEventSetSenderID");
+    xRegisterCb  = (void *)iofind("IOHIDEventSystemClientRegisterEventCallback");
+    xScheduleRL  = (void *)iofind("IOHIDEventSystemClientScheduleWithRunLoop");
     if (!xCreate || !xDispatch) { lg("[touch] no symbols"); return; }
     gHid = xCreate(kCFAllocatorDefault);
     if (gHid && xSetProp) xSetProp(gHid, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
-    lg("[touch] client=%p finger=%p digit=%p dispatch=%p append=%p",
-       (void *)gHid, (void *)xFinger, (void *)xDigitizer, (void *)xDispatch, (void *)xAppend);
+    lg("[touch] client=%p finger=%p digit=%p dispatch=%p append=%p sid=%p",
+       (void *)gHid, (void *)xFinger, (void *)xDigitizer, (void *)xDispatch, (void *)xAppend, xGetSenderID);
+
+    /* 注册事件回调，从真实触摸里拿 senderID，并挂到主 runloop */
+    if (xRegisterCb && xScheduleRL && gHid) {
+        ((int (*)(void *, void *, void *, void *))xRegisterCb)(gHid, (void *)sender_cb, NULL, NULL);
+        ((void (*)(void *, void *, void *))xScheduleRL)(gHid, (void *)CFRunLoopGetMain(),
+                                                        (void *)kCFRunLoopDefaultMode);
+        lg("[touch] sender-id callback registered");
+    }
 }
 
+/* 完全照 ZXTouch：hand 父事件 + finger 子事件 + senderID，三者缺一不可 */
 static void send_touch(int phase, double x, double y, uint32_t ident) {
     if (!gHid) return;
     uint32_t mask; int range, touch;
-    if (phase == 2) { mask = 1 | 2;       range = 0; touch = 0; }
-    else            { mask = 1 | 2 | 4;   range = 1; touch = 1; }
+    if (phase == 2)      { mask = 2; range = 0; touch = 0; }   /* up   */
+    else if (phase == 1) { mask = 4; range = 1; touch = 1; }   /* move */
+    else                 { mask = 3; range = 1; touch = 1; }   /* down */
     uint64_t ts = mach_absolute_time();
 
     void *finger = NULL;
     if (xFinger)
-        finger = xFinger(kCFAllocatorDefault, ts, 0, ident, mask, 0,
-                         (float)x, (float)y, 0.f, 1.f, 0.f, range, touch, 0);
+        finger = xFinger(kCFAllocatorDefault, ts, 0, 3, mask, 0,
+                         (float)x, (float)y, 0.f, 0.f, 0.f, range, touch, 0);
     if (!finger && xDigitizer)
-        finger = xDigitizer(kCFAllocatorDefault, ts, 2, 0, ident, mask, 0,
-                            (float)x, (float)y, 0.f, 1.f, 0.f, range, touch, 0);
+        finger = xDigitizer(kCFAllocatorDefault, ts, 2, 0, 3, mask, 0,
+                            (float)x, (float)y, 0.f, 0.f, 0.f, range, touch, 0);
     if (!finger) return;
 
+    void *(*fset)(void *, uint32_t, float) = (void *)iofind("IOHIDEventSetFloatValue");
+    if (fset) { fset(finger, 0x000B0014, 0.04f); fset(finger, 0x000B0015, 0.04f); }
+    if (gSenderId && xSetSenderID) ((void (*)(void *, uint64_t))xSetSenderID)(finger, gSenderId);
+
     if (xDigitizer && xAppend) {
-        void *hand = xDigitizer(kCFAllocatorDefault, ts, 3, 0, ident, 1 | 2, 0,
-                                0.f, 0.f, 0.f, 0.f, 0.f, range, 0, 0);
-        if (hand) { xAppend(hand, finger); xDispatch(gHid, hand); return; }
+        void *hand = xDigitizer(kCFAllocatorDefault, ts, 3, 99, 1, 0, 0,
+                                0.f, 0.f, 0.f, 0.f, 0.f, 0, 0, 0);
+        if (hand) {
+            void *(*iset)(void *, uint32_t, long) = (void *)iofind("IOHIDEventSetIntegerValue");
+            if (iset) {
+                iset(hand, 0x000B0019, 1);
+                iset(hand, 0x00000004, 1);
+                iset(hand, 0x000B0007, 0x23);
+                iset(hand, 0x000B0008, 1);
+                iset(hand, 0x000B0009, 1);
+            }
+            if (gSenderId && xSetSenderID) ((void (*)(void *, uint64_t))xSetSenderID)(hand, gSenderId);
+            xAppend(hand, finger);
+            xDispatch(gHid, hand);
+            return;
+        }
     }
     xDispatch(gHid, finger);
 }
