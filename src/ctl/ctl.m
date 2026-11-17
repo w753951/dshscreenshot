@@ -63,7 +63,8 @@ static IOHIDEventRef (*pDigitizer)(CFAllocatorRef, DshTime, uint32_t, uint32_t, 
 static IOHIDEventSystemClientRef (*pCreate)(CFAllocatorRef);
 static void (*pSetProp)(IOHIDEventSystemClientRef, CFStringRef, CFTypeRef);
 static void (*pDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
-static IOHIDEventRef (*pKey)(CFAllocatorRef, DshTime, uint32_t, Boolean, Boolean, CFOptionFlags);
+static void (*pAppend)(IOHIDEventRef, IOHIDEventRef);
+static IOHIDEventRef (*pKey)(CFAllocatorRef, DshTime, uint32_t usage, Boolean down, CFOptionFlags opts);
 
 static void *find(const char *n) {
     static const char *libs[] = {
@@ -86,6 +87,7 @@ static int init_hid(void) {
     pCreate    = (void *)find("IOHIDEventSystemClientCreate");
     pSetProp   = (void *)find("IOHIDEventSystemClientSetProperty");
     pDispatch  = (void *)find("IOHIDEventSystemClientDispatchEvent");
+    pAppend    = (void *)find("IOHIDEventAppendEvent");
     pKey       = (void *)find("IOHIDEventCreateKeyboardEvent");
     if (!pCreate || !pDispatch || (!pFinger && !pDigitizer)) return 0;
     gClient = pCreate(kCFAllocatorDefault);
@@ -96,27 +98,36 @@ static int init_hid(void) {
 
 static void msleep(int ms) { if (ms > 0) usleep((useconds_t)ms * 1000); }
 
-/* phase: 0=down 1=move 2=up */
-static IOHIDEventRef finger_ev(int phase, double x, double y, uint32_t ident) {
+/* 发一次触摸：必须 hand 事件 + append finger 子事件，单独 finger 会被系统忽略 */
+static void send_touch(int phase, double x, double y, uint32_t ident) {
     uint32_t mask; Boolean range, touch;
-    if (phase == 0)      { mask = EV_RANGE | EV_TOUCH | EV_POS; range = 1; touch = 1; }
-    else if (phase == 1) { mask = EV_RANGE | EV_TOUCH | EV_POS; range = 1; touch = 1; }
-    else                 { mask = EV_RANGE | EV_TOUCH;          range = 0; touch = 0; }
+    if (phase == 2) { mask = EV_RANGE | EV_TOUCH;          range = 0; touch = 0; }
+    else            { mask = EV_RANGE | EV_TOUCH | EV_POS; range = 1; touch = 1; }
+
     DshTime ts = mach_absolute_time();
+    IOHIDEventRef finger = NULL;
     if (pFinger)
-        return pFinger(kCFAllocatorDefault, ts, 0, ident, mask, 0,
-                       (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
-    return pDigitizer(kCFAllocatorDefault, ts, 0, ident, mask, 0,
-                      (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
+        finger = pFinger(kCFAllocatorDefault, ts, 0, ident, mask, 0,
+                         (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
+    if (!finger && pDigitizer)
+        finger = pDigitizer(kCFAllocatorDefault, ts, 2 /*finger*/, 0, ident, mask, 0,
+                            (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
+    if (!finger) return;
+
+    if (pDigitizer && pAppend) {
+        IOHIDEventRef hand = pDigitizer(kCFAllocatorDefault, ts, 3 /*hand*/, 0, ident,
+                                        EV_RANGE | EV_TOUCH, 0,
+                                        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, range, 0, 0);
+        if (hand) { pAppend(hand, finger); pDispatch(gClient, hand); return; }
+    }
+    pDispatch(gClient, finger);
 }
 
 static int do_tap(double x, double y, int ms) {
     uint32_t id = 0x1001;
-    IOHIDEventRef d = finger_ev(0, x, y, id);
-    if (!d) return 3;
-    pDispatch(gClient, d);
+    send_touch(0, x, y, id);
     msleep(ms);
-    pDispatch(gClient, finger_ev(2, x, y, id));
+    send_touch(2, x, y, id);
     return 0;
 }
 
@@ -124,13 +135,13 @@ static int do_swipe(double x1, double y1, double x2, double y2, int ms) {
     uint32_t id = 0x1002;
     const int steps = 18;
     int step_ms = ms / steps; if (step_ms < 1) step_ms = 1;
-    pDispatch(gClient, finger_ev(0, x1, y1, id));
+    send_touch(0, x1, y1, id);
     for (int i = 1; i <= steps; i++) {
         double t = (double)i / steps;
-        pDispatch(gClient, finger_ev(1, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, id));
+        send_touch(1, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, id);
         msleep(step_ms);
     }
-    pDispatch(gClient, finger_ev(2, x2, y2, id));
+    send_touch(2, x2, y2, id);
     return 0;
 }
 
@@ -158,10 +169,10 @@ static int do_text(const char *s) {
         Boolean shift = false;
         uint32_t code = hid_usage((unsigned char)*p, &shift);
         if (!code) continue;
-        IOHIDEventRef d = pKey(kCFAllocatorDefault, mach_absolute_time(), code, shift, true, 0);
+        IOHIDEventRef d = pKey(kCFAllocatorDefault, mach_absolute_time(), code, true, 0);
         if (d) pDispatch(gClient, d);
         msleep(12);
-        IOHIDEventRef u = pKey(kCFAllocatorDefault, mach_absolute_time(), code, shift, false, 0);
+        IOHIDEventRef u = pKey(kCFAllocatorDefault, mach_absolute_time(), code, false, 0);
         if (u) pDispatch(gClient, u);
         msleep(12);
     }
