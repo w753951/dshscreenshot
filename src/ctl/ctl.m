@@ -72,6 +72,14 @@ static IOHIDEventSystemClientRef (*pCreateType)(CFAllocatorRef, int type, void *
 static IOHIDEventRef gHand = NULL;
 static void *pSetDigitizerInfo = NULL;
 
+/* ---- senderID：ZXTouch 的关键。没有它，UIKit 丢弃我们的事件 ---- */
+static uint64_t gSenderId = 0;
+static const char *kSenderFile = "/var/mobile/ci/senderid.txt";
+static uint64_t (*pGetSenderID)(IOHIDEventRef) = NULL;
+static int      (*pGetType)(IOHIDEventRef) = NULL;
+static void     (*pSetSenderID)(IOHIDEventRef, uint64_t) = NULL;
+static int      (*pRegisterCb)(IOHIDEventSystemClientRef, void *, void *, void *) = NULL;
+
 static int gMode = 0;   /* 注入模式，见 do_tap */
 
 static void *find(const char *n) {
@@ -100,6 +108,10 @@ static int init_hid(void) {
     pSetInt    = (void *)find("IOHIDEventSetIntegerValue");
     pSetFloat  = (void *)find("IOHIDEventSetFloatValue");
     pCreateType= (void *)find("IOHIDEventSystemClientCreateWithType");
+    pGetSenderID = (void *)find("IOHIDEventGetSenderID");
+    pGetType     = (void *)find("IOHIDEventGetType");
+    pSetSenderID = (void *)find("IOHIDEventSetSenderID");
+    pRegisterCb  = (void *)find("IOHIDEventSystemClientRegisterEventCallback");
     if (!pCreate || !pDispatch || (!pFinger && !pDigitizer)) return 0;
     gClient = pCreate(kCFAllocatorDefault);
     if (!gClient && pCreateType) gClient = pCreateType(kCFAllocatorDefault, 0, NULL);
@@ -120,25 +132,73 @@ static int reclient(int type) {
 
 static void msleep(int ms) { if (ms > 0) usleep((useconds_t)ms * 1000); }
 
+/* ---- 从真实触摸里捕获 senderID（ZXTouch 的做法） ---- */
+static void sender_cb(void *target, void *refcon, void *service, IOHIDEventRef event) {
+    (void)target; (void)refcon; (void)service;
+    if (!pGetType || !pGetSenderID) return;
+    if (pGetType(event) != 11) return;              /* kIOHIDEventTypeDigitizer */
+    uint64_t sid = pGetSenderID(event);
+    if (sid && sid != gSenderId) {
+        gSenderId = sid;
+        FILE *f = fopen(kSenderFile, "w");
+        if (f) { fprintf(f, "%llu", (unsigned long long)sid); fclose(f); }
+    }
+}
+
+static void load_sender_id(void) {
+    if (gSenderId) return;
+    FILE *f = fopen(kSenderFile, "r");
+    if (f) {
+        unsigned long long v = 0;
+        if (fscanf(f, "%llu", &v) == 1) gSenderId = v;
+        fclose(f);
+    }
+}
+
+static int do_listen(int seconds) {
+    if (!pRegisterCb) { printf("no register callback symbol\n"); return 1; }
+    IOHIDEventSystemClientRef c = pCreate ? pCreate(kCFAllocatorDefault) : NULL;
+    if (!c) { printf("no client\n"); return 2; }
+    if (pSetProp) pSetProp(c, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+    pRegisterCb(c, (void *)sender_cb, NULL, NULL);
+    printf("listening %ds — 现在用手指真实触摸一下屏幕\n", seconds);
+    for (int i = 0; i < seconds; i++) {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, false);
+        if (gSenderId) {
+            printf("senderID = 0x%llx (已写入 %s)\n", (unsigned long long)gSenderId, kSenderFile);
+            return 0;
+        }
+    }
+    printf("没抓到触摸\n");
+    return 3;
+}
+
 /* 按 SimulateTouch 的做法发触摸：
  *   - hand 父事件只创建一次并复用，自身带 IsDisplayIntegrated
  *   - finger 子事件 append 到父事件，然后 dispatch 父事件
  *   - 坐标是归一化 0..1（不是 pt，也不是 px）
  */
 static void send_touch(int phase, double x, double y, uint32_t ident) {
+    load_sender_id();
+
     if (!gHand && pDigitizer) {
-        gHand = pDigitizer(kCFAllocatorDefault, mach_absolute_time(), 3 /*hand*/, 0, 0,
-                           EV_TOUCH, 0, 0.f, 0.f, 0.f, 0.f, 0.f, 1, 0, 0);
+        /* 完全照 ZXTouch 的参数：hand 父事件 index=99 identity=1 */
+        gHand = pDigitizer(kCFAllocatorDefault, mach_absolute_time(), 3 /*hand*/, 99, 1,
+                           0, 0, 0.f, 0.f, 0.f, 0.f, 0.f, 0, 0, 0);
         if (gHand && pSetInt) {
-            pSetInt(gHand, 0x000B0010, 1);
-            pSetInt(gHand, 0x000B0007, 1);
+            pSetInt(gHand, 0x000B0019, 1);        /* flags */
+            pSetInt(gHand, 0x00000004, 1);
+            pSetInt(gHand, 0x000B0007, 0x23);
+            pSetInt(gHand, 0x000B0008, 1);
+            pSetInt(gHand, 0x000B0009, 1);
         }
+        if (gHand && gSenderId && pSetSenderID) pSetSenderID(gHand, gSenderId);
     }
 
     uint32_t mask; Boolean range, touch;
-    if (phase == 2)      { mask = EV_TOUCH | EV_RANGE;          range = 0; touch = 0; }
-    else if (phase == 1) { mask = EV_TOUCH | EV_RANGE | EV_POS; range = 1; touch = 1; }
-    else                 { mask = EV_TOUCH | EV_RANGE;          range = 1; touch = 1; }
+    if (phase == 2)      { mask = 2;                range = 0; touch = 0; }   /* up   */
+    else if (phase == 1) { mask = 4;                range = 1; touch = 1; }   /* move */
+    else                 { mask = 3;                range = 1; touch = 1; }   /* down */
 
     IOHIDEventRef finger = NULL;
     if (pFinger)
@@ -149,19 +209,11 @@ static void send_touch(int phase, double x, double y, uint32_t ident) {
                             (IOHIDFloat)x, (IOHIDFloat)y, 0.f, 0.f, 0.f, range, touch, 0);
     if (!finger) return;
 
-    if (pSetFloat) {                          /* major/minor radius，仿真手指粗细 */
+    if (pSetFloat) {
         pSetFloat(finger, 0x000B0014, 0.04f);
         pSetFloat(finger, 0x000B0015, 0.04f);
     }
-
-    /* 关键：让 BackBoard 给事件盖上“显示层”章，UIKit 才认可 */
-    if (!pSetDigitizerInfo) {
-        void *bks = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_LAZY);
-        if (bks) pSetDigitizerInfo = (void *)dlsym(bks, "BKSHIDEventSetDigitizerInfo");
-    }
-    if (pSetDigitizerInfo)
-        ((void (*)(void *, void *, uint32_t, int, int, uint32_t))pSetDigitizerInfo)
-            (finger, NULL, 0, 1, 1, 0);
+    if (gSenderId && pSetSenderID) pSetSenderID(finger, gSenderId);
 
     if (gHand && pAppend) {
         pAppend(gHand, finger);
@@ -410,6 +462,9 @@ int main(int argc, char **argv) {
         printf("client=%p finger=%p digitizer=%p dispatch=%p key=%p\n",
                (void *)gClient, (void *)pFinger, (void *)pDigitizer, (void *)pDispatch, (void *)pKey);
         return 0;
+    }
+    if (!strcmp(argv[1], "listen")) {
+        return do_listen(argc >= 3 ? atoi(argv[2]) : 15);
     }
     if (!strcmp(argv[1], "tap") && argc >= 4) {
         int ms = argc >= 5 ? atoi(argv[4]) : 80;
