@@ -133,18 +133,23 @@ static unsigned char *capture_png(size_t *outLen) {
     CFStringRef kHeight = f_strCreate(NULL, "IOSurfaceHeight", 0x08000100);
     CFStringRef kBytes  = f_strCreate(NULL, "IOSurfaceBytesPerElement", 0x08000100);
     CFStringRef kFormat = f_strCreate(NULL, "IOSurfacePixelFormat", 0x08000100);
+    CFStringRef kRow    = f_strCreate(NULL, "IOSurfaceBytesPerRow", 0x08000100);
+    CFStringRef kAlloc  = f_strCreate(NULL, "IOSurfaceAllocSize", 0x08000100);
     if (!kWidth||!kHeight||!kBytes||!kFormat) { lg("[cap] keystr fail"); return NULL; }
 
-    int32_t vw=(int32_t)W, vh=(int32_t)H, vb=4;
+    int32_t vw=(int32_t)W, vh=(int32_t)H, vb=4, vrow=(int32_t)(W*4);
     uint32_t vf=0x42475241; /* 'BGRA' */
+    int32_t valloc=(int32_t)(W*H*4);
     CFNumberRef nw = f_numCreate(NULL, 3, &vw);
     CFNumberRef nh = f_numCreate(NULL, 3, &vh);
     CFNumberRef nb = f_numCreate(NULL, 3, &vb);
     CFNumberRef nf = f_numCreate(NULL, 3, &vf);
+    CFNumberRef nr = f_numCreate(NULL, 3, &vrow);
+    CFNumberRef na = f_numCreate(NULL, 3, &valloc);
 
-    const void *keys[4] = { kWidth, kHeight, kBytes, kFormat };
-    const void *vals[4] = { nw, nh, nb, nf };
-    CFDictRef props = f_dictCreate(NULL, keys, vals, 4, kDictKeyCB, kDictKeyCB);
+    const void *keys[6] = { kWidth, kHeight, kBytes, kFormat, kRow, kAlloc };
+    const void *vals[6] = { nw, nh, nb, nf, nr, na };
+    CFDictRef props = f_dictCreate(NULL, keys, vals, 6, kDictKeyCB, kDictKeyCB);
     if (!props) { lg("[cap] dict fail"); return NULL; }
 
     IOSurfaceRef surf = f_surfaceCreate(props);
@@ -157,9 +162,16 @@ static unsigned char *capture_png(size_t *outLen) {
     lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
 
     CFStringRef lcd = f_strCreate(NULL, "LCD", 0x08000100);
-    int rc = f_renderDisplay(1, lcd, surf);
-    lg("[cap] render ctx=1 rc=%d", rc);
-    if (rc != 0) { f_cfRelease(surf); return NULL; }
+    f_renderDisplay(0, lcd, surf);
+    usleep(80000);
+
+    // 检查 surface 是否有内容（byte 非零计数）
+    size_t nz = 0;
+    const unsigned char *pb = (const unsigned char *)base0;
+    size_t total = bpr0 * bh0;
+    if (pb) { for (size_t i = 0; i < total; i += 97) if (pb[i]) nz++; }
+    lg("[cap] after render: sampled-nonzero=%zu (total/sample=%zu)", nz, total/97);
+    if (nz == 0) { lg("[cap] BLANK surface"); f_cfRelease(surf); return NULL; }
 
     size_t bw = f_surfaceW ? f_surfaceW(surf) : W;
     size_t bh = f_surfaceH ? f_surfaceH(surf) : H;
