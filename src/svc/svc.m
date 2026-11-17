@@ -185,27 +185,42 @@ static unsigned char *capture_png(size_t *outLen) {
     }
 
     int triggered = 0;
-    if (o_getClass && o_msgSend && o_sel) {
-        void *shotter = o_getClass("SBScreenShotter");
-        if (shotter) {
-            void *inst = o_msgSend(shotter, o_sel("sharedInstance"));
-            lg("[cap] shotter inst=%p", inst);
-            if (inst) {
-                o_msgSend(inst, o_sel("saveScreenshot:"), 1);
-                lg("[cap] saveScreenshot: called");
+    // 方法存在性检查，避免发送未知 selector 导致崩溃
+    void *(*o_classGetClassMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getClassMethod") : NULL;
+    void *(*o_classGetInstMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getInstanceMethod") : NULL;
+    lg("[cap] classGetClassMethod=%p classGetInstMethod=%p", (void*)o_classGetClassMethod, (void*)o_classGetInstMethod);
+
+    void *mgr = o_getClass ? o_getClass("SBScreenshotManager") : NULL;
+    lg("[cap] mgr=%p", mgr);
+
+    if (mgr && o_msgSend && o_sel) {
+        void *selShared = o_sel("sharedInstance");
+        void *selNew    = o_sel("new");
+        void *selSave   = o_sel("saveScreenshots");
+        void *selSaveC  = o_sel("saveScreenshotsWithCompletion:");
+
+        int hasShared = (o_classGetClassMethod && o_classGetClassMethod(mgr, selShared)) ? 1 : 0;
+        int hasNew    = (o_classGetClassMethod && o_classGetClassMethod(mgr, selNew)) ? 1 : 0;
+        int hasSave   = (o_classGetInstMethod  && o_classGetInstMethod(mgr, selSave)) ? 1 : 0;
+        int hasSaveC  = (o_classGetInstMethod  && o_classGetInstMethod(mgr, selSaveC)) ? 1 : 0;
+        lg("[cap] has sharedInstance=%d new=%d saveScreenshots=%d saveWithCompletion=%d",
+           hasShared, hasNew, hasSave, hasSaveC);
+
+        void *inst = NULL;
+        if (hasShared) { inst = o_msgSend(mgr, selShared); lg("[cap] via sharedInstance inst=%p", inst); }
+        if (!inst && hasNew) { inst = o_msgSend(mgr, selNew); lg("[cap] via new inst=%p", inst); }
+
+        if (inst) {
+            if (hasSave) {
+                o_msgSend(inst, selSave);
+                lg("[cap] saveScreenshots called");
                 triggered = 1;
-            }
-        }
-        if (!triggered) {
-            void *mgr = o_getClass("SBScreenshotManager");
-            if (mgr) {
-                void *inst = o_msgSend(mgr, o_sel("sharedInstance"));
-                lg("[cap] screenshotManager inst=%p", inst);
-                if (inst) {
-                    o_msgSend(inst, o_sel("saveScreenshots"));
-                    lg("[cap] saveScreenshots called");
-                    triggered = 1;
-                }
+            } else if (hasSaveC) {
+                o_msgSend(inst, selSaveC, (void*)0);
+                lg("[cap] saveScreenshotsWithCompletion: called");
+                triggered = 1;
+            } else {
+                lg("[cap] no save selector on manager");
             }
         }
     }
