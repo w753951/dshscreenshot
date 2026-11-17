@@ -291,6 +291,7 @@ static DshRect dot_bounds(void) {
 }
 
 /* 在 (nx, ny) 归一化位置显示一个红点；保持 1.6 秒后自动隐藏 */
+#define R 60.0   /* 圆点半径（pt），足够大到一眼看见 */
 static void show_dot_impl(double nx, double ny) {
     if (!gMsg || !gSel || !gGetClass) { lg("[dot] no objc"); return; }
     DshRect b = dot_bounds();
@@ -309,14 +310,14 @@ static void show_dot_impl(double nx, double ny) {
         lg("[dot] window created %p (%.0fx%.0f)", win, b.w, b.h);
     }
 
-    DshRect fr = { nx * b.w - 15.0, ny * b.h - 15.0, 30.0, 30.0 };
+    DshRect fr = { nx * b.w - R, ny * b.h - R, R * 2.0, R * 2.0 };
     if (!gDotView) {
         void *v = SEND(gGetClass("UIView"), "alloc");
         v = SEND1R(v, "initWithFrame:", fr);
         void *red = SEND(gGetClass("UIColor"), "redColor");
         SEND1(v, "setBackgroundColor:", red);
         void *layer = SEND(v, "layer");
-        if (layer) SEND1D(layer, "setCornerRadius:", 15.0);
+        if (layer) { SEND1D(layer, "setCornerRadius:", R); SEND1D(layer, "setBorderWidth:", 4.0); }
         SEND1(gDotWin, "addSubview:", v);
         gDotView = v;
     } else {
