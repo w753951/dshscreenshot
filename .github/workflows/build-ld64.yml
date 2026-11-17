@@ -24,10 +24,11 @@ jobs:
           set -e
           wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O mf.sh
           bash mf.sh -b -p $HOME/mf
-          $HOME/mf/bin/conda install -y -q -c conda-forge ld64_osx-64 2>&1 | tail -5
-          echo "--- ld64 binaries ---"
-          find $HOME/mf -name 'ld64*' -o -name 'ld' | head -10
-          ls $HOME/mf/bin/ | grep -iE 'ld|lipo' || true
+          $HOME/mf/bin/conda install -y -c conda-forge ld64_osx-64 || echo "ld64_osx-64 install failed"
+          echo "--- search all ld64-ish files ---"
+          find $HOME/mf -iname '*ld64*' 2>/dev/null | head -20
+          echo "--- conda list ---"
+          $HOME/mf/bin/conda list | grep -i ld64 || echo "no ld64 in list"
 
       - name: Fetch SDK
         run: |
@@ -38,8 +39,9 @@ jobs:
         run: |
           SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
           [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
-          LD64=$(find $HOME/mf -name 'ld64' -type f | head -1)
+          LD64=$(find $HOME/mf -iname '*ld64*' -type f -perm -u+x 2>/dev/null | head -1)
           echo "LD64=$LD64"
+          [ -z "$LD64" ] && { echo "NO LD64 FOUND"; exit 1; }
           $LD64 -v 2>&1 | head -3 || true
           C=/usr/lib/llvm-19/bin/clang
           mkdir -p out
