@@ -5,11 +5,14 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <errno.h>
-#include <pthread.h>
+
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+extern void *dispatch_get_global_queue(long identifier, unsigned long flags);
+extern void dispatch_async(void *queue, void *block);
 
 static const int  kPort = 47191;
 static const char *kLog = "/var/mobile/dsh-screen-plugin.log";
@@ -56,8 +59,7 @@ static void handle_client(int fd) {
     close(fd);
 }
 
-static void *server_thread(void *arg) {
-    (void)arg;
+static void server_main(void) {
     // 关键：等 SpringBoard 启动完成，避免在 dyld 初始化期间 dlopen 导致 load 重入
     sleep(10);
     lg("[svc] thread start uid=%d pid=%d", getuid(), getpid());
@@ -66,7 +68,7 @@ static void *server_thread(void *arg) {
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     lg("[svc] socket fd=%d errno=%d", fd, errno);
-    if (fd < 0) { return NULL; }
+    if (fd < 0) { return; }
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
@@ -77,9 +79,9 @@ static void *server_thread(void *arg) {
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     if (bind(fd, (struct sockaddr*)&a, sizeof(a)) != 0) {
-        lg("[svc] bind errno=%d", errno); close(fd); return NULL;
+        lg("[svc] bind errno=%d", errno); close(fd); return;
     }
-    if (listen(fd, 8) != 0) { lg("[svc] listen errno=%d", errno); close(fd); return NULL; }
+    if (listen(fd, 8) != 0) { lg("[svc] listen errno=%d", errno); close(fd); return; }
     lg("[svc] listening 127.0.0.1:%d", kPort);
 
     for (;;) {
@@ -87,7 +89,7 @@ static void *server_thread(void *arg) {
         if (c < 0) { if (errno == EINTR) continue; lg("[svc] accept errno=%d", errno); break; }
         handle_client(c);
     }
-    return NULL;
+    return;
 }
 
 __attribute__((constructor))
@@ -95,10 +97,7 @@ static void svc_init(void) {
     FILE *f = fopen("/var/mobile/dsh-min.log", "a");
     if (f) { fprintf(f, "svc-ctor uid=%d pid=%d\n", getuid(), getpid()); fclose(f); }
 
-    pthread_t th; pthread_attr_t at;
-    pthread_attr_init(&at);
-    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, server_thread, NULL) != 0)
-        lg("[svc] pthread_create failed");
-    pthread_attr_destroy(&at);
+    // QOS_CLASS_UTILITY = 0x11
+    void *q = dispatch_get_global_queue(0x11, 0);
+    dispatch_async(q, ^{ server_main(); });
 }
