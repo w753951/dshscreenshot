@@ -163,6 +163,97 @@ static void reply(int fd, int code, const char *reason, const char *ctype,
     }
 }
 
+/* ================= 触摸注入（在 SpringBoard 里发，权限最高） ================= */
+#include <mach/mach_time.h>
+
+typedef void *HIDClient;
+static HIDClient gHid = NULL;
+static HIDClient (*xCreate)(CFAllocatorRef);
+static void   (*xSetProp)(HIDClient, CFStringRef, CFTypeRef);
+static void   (*xDispatch)(HIDClient, void *);
+static void  *(*xFinger)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                         float, float, float, float, float, int, int, unsigned long);
+static void  *(*xDigitizer)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                            uint32_t, float, float, float, float, float, int, int, unsigned long);
+static void   (*xAppend)(void *, void *);
+
+static void *iofind(const char *n) {
+    static const char *libs[] = {
+        "/System/Library/Frameworks/IOKit.framework/IOKit",
+        "/System/Library/PrivateFrameworks/IOKit.framework/IOKit",
+        NULL
+    };
+    for (int i = 0; libs[i]; i++) {
+        void *h = dlopen(libs[i], RTLD_LAZY);
+        if (!h) continue;
+        void *s = dlsym(h, n);
+        if (s) return s;
+    }
+    return NULL;
+}
+
+static void touch_init(void) {
+    xCreate    = (void *)iofind("IOHIDEventSystemClientCreate");
+    xSetProp   = (void *)iofind("IOHIDEventSystemClientSetProperty");
+    xDispatch  = (void *)iofind("IOHIDEventSystemClientDispatchEvent");
+    xFinger    = (void *)iofind("IOHIDEventCreateDigitizerFingerEvent");
+    xDigitizer = (void *)iofind("IOHIDEventCreateDigitizerEvent");
+    xAppend    = (void *)iofind("IOHIDEventAppendEvent");
+    if (!xCreate || !xDispatch) { lg("[touch] no symbols"); return; }
+    gHid = xCreate(kCFAllocatorDefault);
+    if (gHid && xSetProp) xSetProp(gHid, CFSTR("AllowInstrumentation"), kCFBooleanTrue);
+    lg("[touch] client=%p finger=%p digit=%p dispatch=%p append=%p",
+       (void *)gHid, (void *)xFinger, (void *)xDigitizer, (void *)xDispatch, (void *)xAppend);
+}
+
+static void send_touch(int phase, double x, double y, uint32_t ident) {
+    if (!gHid) return;
+    uint32_t mask; int range, touch;
+    if (phase == 2) { mask = 1 | 2;       range = 0; touch = 0; }
+    else            { mask = 1 | 2 | 4;   range = 1; touch = 1; }
+    uint64_t ts = mach_absolute_time();
+
+    void *finger = NULL;
+    if (xFinger)
+        finger = xFinger(kCFAllocatorDefault, ts, 0, ident, mask, 0,
+                         (float)x, (float)y, 0.f, 1.f, 0.f, range, touch, 0);
+    if (!finger && xDigitizer)
+        finger = xDigitizer(kCFAllocatorDefault, ts, 2, 0, ident, mask, 0,
+                            (float)x, (float)y, 0.f, 1.f, 0.f, range, touch, 0);
+    if (!finger) return;
+
+    if (xDigitizer && xAppend) {
+        void *hand = xDigitizer(kCFAllocatorDefault, ts, 3, 0, ident, 1 | 2, 0,
+                                0.f, 0.f, 0.f, 0.f, 0.f, range, 0, 0);
+        if (hand) { xAppend(hand, finger); xDispatch(gHid, hand); return; }
+    }
+    xDispatch(gHid, finger);
+}
+
+static void do_tap(double x, double y, int ms) {
+    send_touch(0, x, y, 0x2001);
+    usleep(ms * 1000);
+    send_touch(2, x, y, 0x2001);
+}
+
+static void do_swipe(double x1, double y1, double x2, double y2, int ms) {
+    const int steps = 18;
+    int step_ms = ms / steps; if (step_ms < 1) step_ms = 1;
+    send_touch(0, x1, y1, 0x2002);
+    for (int i = 1; i <= steps; i++) {
+        double t = (double)i / steps;
+        send_touch(1, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, 0x2002);
+        usleep(step_ms * 1000);
+    }
+    send_touch(2, x2, y2, 0x2002);
+}
+
+static double qnum(const char *req, const char *name, double def) {
+    char pat[48]; snprintf(pat, sizeof(pat), "%s=", name);
+    const char *p = strstr(req, pat);
+    return p ? atof(p + strlen(pat)) : def;
+}
+
 static void handle(int fd) {
     char buf[2048];
     ssize_t n = recv(fd, buf, sizeof(buf)-1, 0);
@@ -170,8 +261,24 @@ static void handle(int fd) {
     buf[n] = 0;
     lg("[http] %.60s", buf);
 
+    if (!strstr(buf, kKey)) { reply(fd,403,"Forbidden","text/plain","denied",6); close(fd); return; }
+
+    if (strstr(buf, "GET /tap")) {
+        double x = qnum(buf, "x", 0), y = qnum(buf, "y", 0);
+        int ms = (int)qnum(buf, "ms", 80);
+        do_tap(x, y, ms);
+        lg("[tap] %.0f,%.0f", x, y);
+        reply(fd, 200, "OK", "text/plain", "tap ok", 6);
+        close(fd); return;
+    }
+    if (strstr(buf, "GET /swipe")) {
+        do_swipe(qnum(buf,"x1",0), qnum(buf,"y1",0), qnum(buf,"x2",0), qnum(buf,"y2",0),
+                 (int)qnum(buf,"ms",300));
+        lg("[swipe] done");
+        reply(fd, 200, "OK", "text/plain", "swipe ok", 8);
+        close(fd); return;
+    }
     if (!strstr(buf, "GET /capture")) { reply(fd,400,"Bad Request","text/plain","Unavailable",11); close(fd); return; }
-    if (!strstr(buf, kKey))            { reply(fd,403,"Forbidden","text/plain","denied",6); close(fd); return; }
 
     size_t len = 0;
     unsigned char *png = capture_png(&len);
@@ -214,6 +321,7 @@ __attribute__((constructor))
 static void svc_init(void) {
     FILE *f = fopen("/var/mobile/dsh-min.log", "a");
     if (f) { fprintf(f, "svc-ctor uid=%d pid=%d\n", getuid(), getpid()); fclose(f); }
+    touch_init();
     pthread_t th; pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
