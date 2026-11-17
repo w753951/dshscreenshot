@@ -736,11 +736,7 @@ static void handle(int fd) {
         onMain(^{
             NSMutableString *s = [NSMutableString string];
             UIWindow *w = dsh_window();
-            [s appendFormat:@"# windows=%lu\n", (unsigned long)dsh_all_windows().count];
-            for (UIWindow *tw in dsh_all_windows()) {
-                [s appendFormat:@"@ %s %.0fx%.0f level=%.0f hidden=%d\n", NSStringFromClass([tw class]).UTF8String, tw.bounds.size.width, tw.bounds.size.height, tw.windowLevel, (int)tw.hidden];
-                dsh_dump(tw, 0, s, YES);
-            }
+            /* 只 dump 一个窗口：多窗口遍历会在微信里炸内存，v13 就是这么崩的 */
             [s appendFormat:@"# window=%s %.0fx%.0f\n",
                 w ? NSStringFromClass([w class]).UTF8String : "nil",
                 w ? w.bounds.size.width : 0, w ? w.bounds.size.height : 0];
