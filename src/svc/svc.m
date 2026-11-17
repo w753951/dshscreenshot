@@ -173,7 +173,8 @@ static HIDClient gHid = NULL;
 static HIDClient (*xCreate)(CFAllocatorRef);
 static void   (*xSetProp)(HIDClient, CFStringRef, CFTypeRef);
 static void   (*xDispatch)(HIDClient, void *);
-static void  *(*xFinger)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t,
+/* IOHIDEventCreateDigitizerFingerEvent：13 个参数，没有 buttonMask */
+static void  *(*xFinger)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t,
                          float, float, float, float, float, int, int, unsigned long);
 static void  *(*xDigitizer)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t,
                             uint32_t, float, float, float, float, float, int, int, unsigned long);
@@ -247,7 +248,7 @@ static void send_touch(int phase, double x, double y, uint32_t ident) {
 
     void *finger = NULL;
     if (xFinger)
-        finger = xFinger(kCFAllocatorDefault, ts, 0, 3, mask, 0,
+        finger = xFinger(kCFAllocatorDefault, ts, 0, 3, mask,
                          (float)x, (float)y, 0.f, 0.f, 0.f, range, touch, 0);
     if (!finger && xDigitizer)
         finger = xDigitizer(kCFAllocatorDefault, ts, 2, 0, 3, mask, 0,
