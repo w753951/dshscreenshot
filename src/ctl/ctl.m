@@ -45,7 +45,7 @@
 typedef void *IOHIDEventSystemClientRef;
 typedef void *IOHIDEventRef;
 typedef float IOHIDFloat;
-typedef double AbsoluteTime;
+typedef uint64_t DshTime;   /* mach_absolute_time() 的返回类型 */
 
 enum {
     EV_RANGE = 1 << 0,
@@ -54,16 +54,16 @@ enum {
 };
 
 static IOHIDEventSystemClientRef gClient;
-static IOHIDEventRef (*pFinger)(CFAllocatorRef, AbsoluteTime, uint32_t, uint32_t, uint32_t,
+static IOHIDEventRef (*pFinger)(CFAllocatorRef, DshTime, uint32_t, uint32_t, uint32_t,
                                 uint32_t, IOHIDFloat, IOHIDFloat, IOHIDFloat, IOHIDFloat,
                                 IOHIDFloat, Boolean, Boolean, CFOptionFlags);
-static IOHIDEventRef (*pDigitizer)(CFAllocatorRef, AbsoluteTime, uint32_t, uint32_t, uint32_t,
+static IOHIDEventRef (*pDigitizer)(CFAllocatorRef, DshTime, uint32_t, uint32_t, uint32_t,
                                    uint32_t, IOHIDFloat, IOHIDFloat, IOHIDFloat, IOHIDFloat,
                                    IOHIDFloat, Boolean, Boolean, CFOptionFlags);
 static IOHIDEventSystemClientRef (*pCreate)(CFAllocatorRef);
 static void (*pSetProp)(IOHIDEventSystemClientRef, CFStringRef, CFTypeRef);
 static void (*pDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
-static IOHIDEventRef (*pKey)(CFAllocatorRef, AbsoluteTime, uint32_t, Boolean, Boolean, CFOptionFlags);
+static IOHIDEventRef (*pKey)(CFAllocatorRef, DshTime, uint32_t, Boolean, Boolean, CFOptionFlags);
 
 static void *find(const char *n) {
     static const char *libs[] = {
@@ -102,7 +102,7 @@ static IOHIDEventRef finger_ev(int phase, double x, double y, uint32_t ident) {
     if (phase == 0)      { mask = EV_RANGE | EV_TOUCH | EV_POS; range = 1; touch = 1; }
     else if (phase == 1) { mask = EV_RANGE | EV_TOUCH | EV_POS; range = 1; touch = 1; }
     else                 { mask = EV_RANGE | EV_TOUCH;          range = 0; touch = 0; }
-    AbsoluteTime ts = mach_absolute_time();
+    DshTime ts = mach_absolute_time();
     if (pFinger)
         return pFinger(kCFAllocatorDefault, ts, 0, ident, mask, 0,
                        (IOHIDFloat)x, (IOHIDFloat)y, 0.0f, 1.0f, 0.0f, range, touch, 0);
