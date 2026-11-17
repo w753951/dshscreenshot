@@ -10,7 +10,7 @@ jobs:
       - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y git make curl wget unzip xz-utils libtinfo5 libncurses5
+          sudo apt-get install -y git make curl wget unzip xz-utils dpkg libtinfo5 libncurses5 ldid
 
       - name: toolchain
         run: |
@@ -42,13 +42,19 @@ jobs:
 
       - name: build
         run: |
-          set -e
+          set -euo pipefail
           export THEOS="$HOME/theos"
+          mkdir -p "$THEOS/toolchain/linux"
+          rm -rf "$THEOS/toolchain/linux/iphone"
+          ln -sfn "$HOME/tc/ios-arm64e-clang-toolchain" "$THEOS/toolchain/linux/iphone"
+          ln -sfn "$(command -v ldid || echo /usr/bin/ldid)" "$THEOS/toolchain/linux/iphone/bin/ldid" 2>/dev/null || true
           export PATH="$HOME/tc/ios-arm64e-clang-toolchain/bin:$PATH"
           export THEOS_PACKAGE_SCHEME=rootless
           cd src/pccontrol
-          make package FINALPACKAGE=1 2>&1 | tail -40
-          find . -name "*.deb" -maxdepth 3
+          make package FINALPACKAGE=1 2>&1 | grep -viE "warning|note:" | tail -60
+          echo "=== debs ==="
+          find . -name "*.deb" -maxdepth 4 | tee /tmp/debs.txt
+          test -s /tmp/debs.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
