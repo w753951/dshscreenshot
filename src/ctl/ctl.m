@@ -69,7 +69,8 @@ static void (*pSetInt)(IOHIDEventRef, uint32_t field, CFIndex value);
 static void (*pSetFloat)(IOHIDEventRef, uint32_t field, IOHIDFloat value);
 static IOHIDEventSystemClientRef (*pCreateType)(CFAllocatorRef, int type, void *err);
 
-static IOHIDEventRef gHand = NULL;   /* 复用同一个 hand 父事件（SimulateTouch 做法） */
+static IOHIDEventRef gHand = NULL;
+static void *pSetDigitizerInfo = NULL;
 
 static int gMode = 0;   /* 注入模式，见 do_tap */
 
@@ -152,6 +153,15 @@ static void send_touch(int phase, double x, double y, uint32_t ident) {
         pSetFloat(finger, 0x000B0014, 0.04f);
         pSetFloat(finger, 0x000B0015, 0.04f);
     }
+
+    /* 关键：让 BackBoard 给事件盖上“显示层”章，UIKit 才认可 */
+    if (!pSetDigitizerInfo) {
+        void *bks = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_LAZY);
+        if (bks) pSetDigitizerInfo = (void *)dlsym(bks, "BKSHIDEventSetDigitizerInfo");
+    }
+    if (pSetDigitizerInfo)
+        ((void (*)(void *, void *, uint32_t, int, int, uint32_t))pSetDigitizerInfo)
+            (finger, NULL, 0, 1, 1, 0);
 
     if (gHand && pAppend) {
         pAppend(gHand, finger);
