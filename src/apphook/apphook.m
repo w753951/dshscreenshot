@@ -56,6 +56,16 @@ static void onMain(void (^blk)(void)) {
 #pragma mark - window
 
 static UIWindow *dsh_window(void) {
+    {
+        UIWindow *big = nil;
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            NSString *cls = NSStringFromClass([w class]);
+            if ([cls containsString:@"Keyboard"]) continue;
+            if (w.hidden || w.alpha < 0.01) continue;
+            if (!big || w.bounds.size.height > big.bounds.size.height) big = w;
+        }
+        if (big) return big;
+    }
     /* 键盘弹出时 keyWindow 会变成键盘窗口（高度只有 300 多），先取「最高的非键盘窗口」 */
     {
         UIWindow *big = nil;
@@ -222,7 +232,7 @@ static NSString *dsh_tap(double nx, double ny) {
     onMain(^{
         UIWindow *win = dsh_window();
         if (!win) return;
-        CGSize sz = win.bounds.size;
+        CGSize sz = [UIScreen mainScreen].bounds.size;   /* 截图为整屏，归一化必须按整屏算 */
         CGPoint p = CGPointMake(nx * sz.width, ny * sz.height);
         dsh_dot(p);
 
