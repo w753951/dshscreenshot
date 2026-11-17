@@ -163,37 +163,48 @@ static void reply(int fd, int code, const char *reason, const char *ctype,
 static unsigned char *capture_png(size_t *outLen) {
     *outLen = 0;
 
-    char base[256] = {0};
-    newest_png(base, sizeof(base));
-    lg("[cap] baseline=%s", base);
+    /* 方案 D：__UICreateScreenUIImageWithRotation（Snapper3 用的就是这个）
+     * UIKit 私有 C 函数：
+     *   UIImage *__UICreateScreenUIImageWithRotation(BOOL rotate)
+     *   NSData  *UIImagePNGRepresentation(UIImage *)
+     * NSData 与 CFData 是 toll-free bridged，可直接用 CFDataGetBytePtr 取字节 */
+    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
+    lg("[cap] UIKit=%p", uikit);
+    if (!uikit) { lg("[cap] no UIKit"); return NULL; }
 
-    if (!trigger_screenshot()) { lg("[cap] trigger failed"); return NULL; }
+    void *(*createScreen)(int) = dlsym(uikit, "__UICreateScreenUIImageWithRotation");
+    void *(*createScreen2)(int) = dlsym(uikit, "_UICreateScreenUIImageWithRotation");
+    void *(*pngRep)(void *) = dlsym(uikit, "UIImagePNGRepresentation");
+    lg("[cap] createScreen=%p alt=%p pngRep=%p", (void*)createScreen, (void*)createScreen2, (void*)pngRep);
 
-    char now[256] = {0};
-    char path[512] = {0};
-    int found = 0;
-    for (int i = 0; i < 50; i++) {
-        usleep(100000);
-        now[0] = 0;
-        newest_png(now, sizeof(now));
-        if (now[0] && strcmp(now, base) != 0) {
-            if (find_path(now, path, sizeof(path))) { found = 1; break; }
+    void *img = NULL;
+    if (createScreen) img = createScreen(1);
+    else if (createScreen2) img = createScreen2(1);
+    lg("[cap] image=%p", img);
+    if (!img || !pngRep) { lg("[cap] no image"); return NULL; }
+
+    void *data = pngRep(img);
+    lg("[cap] nsdata=%p", data);
+    if (!data) { lg("[cap] no data"); return NULL; }
+
+    /* CFData 兼容取字节 */
+    void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
+    const void *(*getBytes)(void*) = cf ? dlsym(cf, "CFDataGetBytePtr") : NULL;
+    long (*getLen)(void*) = cf ? dlsym(cf, "CFDataGetLength") : NULL;
+
+    unsigned char *out = NULL;
+    if (getBytes && getLen) {
+        long len = getLen(data);
+        const void *b = getBytes(data);
+        lg("[cap] png len=%ld bytes=%p", len, b);
+        if (len > 8 && b) {
+            out = malloc((size_t)len);
+            if (out) { memcpy(out, b, (size_t)len); *outLen = (size_t)len; }
         }
+    } else {
+        lg("[cap] CFData syms missing");
     }
-    if (!found) { lg("[cap] no new file after 5s"); return NULL; }
-    lg("[cap] new file %s", path);
-
-    FILE *fp = fopen(path, "rb");
-    if (!fp) { lg("[cap] open fail"); return NULL; }
-    fseek(fp, 0, SEEK_END);
-    long len = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    if (len <= 0) { fclose(fp); return NULL; }
-    unsigned char *buf = malloc((size_t)len);
-    if (buf && fread(buf, 1, (size_t)len, fp) != (size_t)len) { free(buf); buf = NULL; }
-    fclose(fp);
-    if (buf) { *outLen = (size_t)len; lg("[cap] png %zu bytes", *outLen); }
-    return buf;
+    return out;
 }
 
 static void handle(int fd) {
