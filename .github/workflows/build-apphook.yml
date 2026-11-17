@@ -48,7 +48,7 @@ jobs:
               -o out/DshAppHook.$ARCH.dylib src/apphook/apphook.m && echo "$ARCH OK" || echo "$ARCH FAILED"
           done
           # 设备要求 cpusubtype = 0x80000002（arm64e + PAC ABI v2）
-          for f in out/*.dylib; do printf '\x02\x00\x00\x80' | dd of=$f bs=1 seek=8 conv=notrunc; done
+          for f in out/*.dylib; do printf '\x00\x00\x00\x00' | dd of=$f bs=1 seek=8 conv=notrunc; done
           ls -la out/
           for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
 
