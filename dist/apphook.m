@@ -375,35 +375,41 @@ static NSString *dsh_scroll(double dy) {
     return out;
 }
 
-/* 在可见行里找文本，找到就滚到中间并返回 indexPath；找不到返回 not-visible */
+/* 在可见行里找文本，找到就滚到中间并返回 indexPath；找不到返回 not-visible
+   注意：所有 UIKit 访问必须在主线程，否则微信会在后台线程 brk 掉（SIGTRAP / EXC_BREAKPOINT） */
 static NSString *dsh_locate(NSString *needle) {
-    for (id tv in dsh_all_tables()) {
-        if ([tv isKindOfClass:[UITableView class]]) {
-            UITableView *t = (UITableView *)tv;
-            for (UITableViewCell *c in t.visibleCells) {
-                NSString *txt = dsh_cell_text(c);
-                if ([txt rangeOfString:needle].location != NSNotFound) {
-                    NSIndexPath *ip = [t indexPathForCell:c];
-                    if (ip) {
-                        [t scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
-                        return [NSString stringWithFormat:@"%ld:%ld|%@", (long)ip.section, (long)ip.row, txt];
+    __block NSString *out = @"not-visible";
+    onMain(^{
+        for (id tv in dsh_all_tables()) {
+            if ([tv isKindOfClass:[UITableView class]]) {
+                UITableView *t = (UITableView *)tv;
+                for (UITableViewCell *c in t.visibleCells) {
+                    NSString *txt = dsh_cell_text(c);
+                    if ([txt rangeOfString:needle].location != NSNotFound) {
+                        NSIndexPath *ip = [t indexPathForCell:c];
+                        if (ip) {
+                            [t scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+                            out = [NSString stringWithFormat:@"%ld:%ld|%@", (long)ip.section, (long)ip.row, txt];
+                            return;
+                        }
                     }
                 }
-            }
-        } else {
-            UICollectionView *t = (UICollectionView *)tv;
-            for (UICollectionViewCell *c in t.visibleCells) {
-                NSString *txt = dsh_cell_text(c);
-                if ([txt rangeOfString:needle].location != NSNotFound) {
-                    NSIndexPath *ip = [t indexPathForCell:c];
-                    if (ip) {
-                        return [NSString stringWithFormat:@"%ld:%ld|%@", (long)ip.section, (long)ip.item, txt];
+            } else {
+                UICollectionView *t = (UICollectionView *)tv;
+                for (UICollectionViewCell *c in t.visibleCells) {
+                    NSString *txt = dsh_cell_text(c);
+                    if ([txt rangeOfString:needle].location != NSNotFound) {
+                        NSIndexPath *ip = [t indexPathForCell:c];
+                        if (ip) {
+                            out = [NSString stringWithFormat:@"%ld:%ld|%@", (long)ip.section, (long)ip.item, txt];
+                            return;
+                        }
                     }
                 }
             }
         }
-    }
-    return @"not-visible";
+    });
+    return out;
 }
 
 /* 一步步滚，最多 maxStep 次，找到就停 */
