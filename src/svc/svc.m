@@ -162,7 +162,7 @@ static unsigned char *capture_png(size_t *outLen) {
     lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
 
     CFStringRef lcd = f_strCreate(NULL, "LCD", 0x08000100);
-    f_renderDisplay(0, lcd, surf);
+    f_renderDisplay(1, lcd, surf);
     usleep(80000);
 
     // 检查 surface 是否有内容（byte 非零计数）
