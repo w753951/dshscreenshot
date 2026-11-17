@@ -259,6 +259,17 @@ static void send_touch(int phase, double x, double y, uint32_t ident) {
     if (fset) { fset(finger, 0x000B0014, 0.04f); fset(finger, 0x000B0015, 0.04f); }
     if (gSenderId && xSetSenderID) ((void (*)(void *, uint64_t))xSetSenderID)(finger, gSenderId);
 
+    /* finger 也补上 ZXTouch 用到的整型字段 */
+    {
+        void *(*iset2)(void *, uint32_t, long) = (void *)iofind("IOHIDEventSetIntegerValue");
+        if (iset2) {
+            iset2(finger, 0x000B0019, 1);
+            iset2(finger, 0x000B0007, 0x23);
+            iset2(finger, 0x000B0008, 1);
+            iset2(finger, 0x000B0009, 1);
+        }
+    }
+
     if (xDigitizer && xAppend) {
         void *hand = xDigitizer(kCFAllocatorDefault, ts, 3, 99, 1, 0, 0,
                                 0.f, 0.f, 0.f, 0.f, 0.f, 0, 0, 0);
