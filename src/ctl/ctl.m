@@ -58,8 +58,8 @@ static IOHIDEventRef (*pFinger)(CFAllocatorRef, DshTime, uint32_t, uint32_t, uin
                                 uint32_t, IOHIDFloat, IOHIDFloat, IOHIDFloat, IOHIDFloat,
                                 IOHIDFloat, Boolean, Boolean, CFOptionFlags);
 static IOHIDEventRef (*pDigitizer)(CFAllocatorRef, DshTime, uint32_t, uint32_t, uint32_t,
-                                   uint32_t, IOHIDFloat, IOHIDFloat, IOHIDFloat, IOHIDFloat,
-                                   IOHIDFloat, Boolean, Boolean, CFOptionFlags);
+                                   uint32_t, uint32_t, IOHIDFloat, IOHIDFloat, IOHIDFloat,
+                                   IOHIDFloat, IOHIDFloat, Boolean, Boolean, CFOptionFlags);
 static IOHIDEventSystemClientRef (*pCreate)(CFAllocatorRef);
 static void (*pSetProp)(IOHIDEventSystemClientRef, CFStringRef, CFTypeRef);
 static void (*pDispatch)(IOHIDEventSystemClientRef, IOHIDEventRef);
