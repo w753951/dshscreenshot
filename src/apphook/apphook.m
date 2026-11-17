@@ -129,6 +129,35 @@ static BOOL dsh_fire_gesture_tree(UIView *root, int maxDepth) {
     return NO;
 }
 
+#pragma mark - 点击位置可视化
+
+static UIWindow *gDotWin = nil;
+
+/* 在目标位置闪一个半透明红圈，0.9 秒消失 */
+static void dsh_show_dot(CGPoint p) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!gDotWin) {
+            gDotWin = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+            gDotWin.windowLevel = 10000001.0;
+            gDotWin.userInteractionEnabled = NO;
+            gDotWin.backgroundColor = [UIColor clearColor];
+        }
+        CGFloat R = 20.0;
+        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(p.x - R, p.y - R, R * 2, R * 2)];
+        dot.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.55];
+        dot.layer.cornerRadius = R;
+        dot.layer.borderWidth = 2.0;
+        dot.layer.borderColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.9].CGColor;
+        [gDotWin addSubview:dot];
+        gDotWin.hidden = NO;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [dot removeFromSuperview];
+        });
+        lg(@"dot at %.0f,%.0f", p.x, p.y);
+    });
+}
+
 static NSString *dsh_tap(double nx, double ny) {
     __block NSString *result = @"no-window";
     void (^work)(void) = ^{
@@ -141,6 +170,7 @@ static NSString *dsh_tap(double nx, double ny) {
 
         CGSize sz = win.bounds.size;
         CGPoint p = CGPointMake(nx * sz.width, ny * sz.height);
+        dsh_show_dot(p);
         UIView *v = dsh_hit(win, p);
         if (!v) { result = @"no-view"; return; }
         lg(@"hit %.0f,%.0f -> %@", p.x, p.y, NSStringFromClass([v class]));
