@@ -93,11 +93,11 @@ static NSString *dsh_view_text(UIView *v) {
         t = ((UITextView *)v).text;
     }
     if (!t.length) {
-        static NSString *keys[] = { @"text", @"title", @"attributedText" };
-        for (int i = 0; i < 3; i++) {
-            if (![v respondsToSelector:NSSelectorFromString(keys[i])]) continue;
+        NSArray *keys = @[@"text", @"title", @"attributedText"];
+        for (NSString *k in keys) {
+            if (![v respondsToSelector:NSSelectorFromString(k)]) continue;
             @try {
-                id o = [v valueForKey:keys[i]];
+                id o = [v valueForKey:k];
                 if ([o isKindOfClass:[NSString class]] && [o length]) { t = o; break; }
                 if ([o isKindOfClass:[NSAttributedString class]] && [o length]) { t = [o string]; break; }
             } @catch (__unused NSException *e) {}
@@ -468,9 +468,7 @@ static NSString *dsh_type(NSString *text) {
         [in becomeFirstResponder];
         if ([in isKindOfClass:[UITextView class]]) {
             UITextView *tv = (UITextView *)in;
-            tv.text = text;
-            [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification object:tv];
-            if ([tv.delegate respondsToSelector:@selector(textViewDidChange:)]) [tv.delegate textViewDidChange:tv];
+            [tv insertText:text];   /* 走真实输入路径：触发 inputDelegate → 微信发送键会出现 */
         } else {
             UITextField *tf = (UITextField *)in;
             tf.text = text;
