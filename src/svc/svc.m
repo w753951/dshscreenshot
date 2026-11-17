@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 static const int  kPort = 47191;
 static const char *kKey = "dsh-go-screen-v1";
