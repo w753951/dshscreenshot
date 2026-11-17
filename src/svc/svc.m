@@ -1,11 +1,9 @@
 // svc.m —— SpringBoard 截图服务（真 arm64e）
 // GET http://127.0.0.1:47191/capture?key=dsh-go-screen-v1 -> image/png
 //
-// 设计要点：
-//  1) constructor 只写日志 + 起线程，全部重活放线程里（并延时 8s 等 SpringBoard 启动完成）
-//  2) 私有 API 全部 dlsym 运行时解析，任一缺失都不崩
-//  3) 截图走 CARenderServerRenderDisplay；IOSurface 必须带 IOSurfaceIsGlobal 才能被渲染
-//  4) PNG 编码走 ImageIO 的 CGImageDestination（纯 CF API，不用 ObjC）
+// 抓屏策略：用 IOHID 模拟「电源键 + 音量上」组合键，走系统自带截图流程，
+// 系统会把 PNG 存进 DCIM，我们再读回来。
+// 这条路与你手动按键截图完全一致，成功率最高。
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,19 +12,11 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-
-typedef const void *CFRef;
-typedef struct __IOSurface *IOSurfaceRef;
-typedef struct CGContext *CGContextRef;
-typedef struct CGImage *CGImageRef;
-typedef struct CGColorSpace *CGColorSpaceRef;
-typedef struct __CFDictionary *CFDictRef;
-typedef struct __CFData *CFDataRef;
-typedef struct __CFString *CFStringRef;
 
 static const int  kPort = 47191;
 static const char *kKey = "dsh-go-screen-v1";
@@ -39,170 +29,123 @@ static void lg(const char *fmt, ...) {
     fputc('\n', f); fclose(f);
 }
 
-/* ---------- 符号 ---------- */
-static int (*f_render)(unsigned, CFStringRef, IOSurfaceRef);
-static IOSurfaceRef (*f_surfCreate)(CFDictRef);
-static void *(*f_surfBase)(IOSurfaceRef);
-static size_t (*f_surfBPR)(IOSurfaceRef);
-static size_t (*f_surfW)(IOSurfaceRef);
-static size_t (*f_surfH)(IOSurfaceRef);
+/* ---------- IOKit HID ---------- */
+static void *(*p_clientCreate)(const void*);
+static void  (*p_clientDispatch)(void*, void*);
+static int   (*p_clientSetProp)(void*, const void*, const void*);
+static void *(*p_kbdEvent)(const void*, unsigned long long, unsigned, unsigned, int, unsigned);
+static void *(*p_eventCreate)(unsigned, unsigned, int);
 
-static CGColorSpaceRef (*f_csRGB)(void);
-static void (*f_csRelease)(CGColorSpaceRef);
-static CGContextRef (*f_bmpCtx)(void*, size_t, size_t, size_t, size_t, CGColorSpaceRef, unsigned);
-static CGImageRef (*f_ctxImage)(CGContextRef);
-static void (*f_ctxRelease)(CGContextRef);
-static void (*f_imgRelease)(CGImageRef);
+/* 在 DCIM 里找最新 PNG 文件名（不含路径），失败返回 0 */
+static void newest_png(char *out, size_t cap) {
+    out[0] = 0;
+    const char *dirs[] = {
+        "/var/mobile/Media/DCIM/125APPLE",
+        "/var/mobile/Media/DCIM/124APPLE",
+        "/var/mobile/Media/DCIM/100APPLE",
+        NULL
+    };
+    for (int d = 0; dirs[d]; d++) {
+        DIR *dp = opendir(dirs[d]);
+        if (!dp) continue;
+        struct dirent *e;
+        while ((e = readdir(dp)) != NULL) {
+            size_t L = strlen(e->d_name);
+            if (L < 5) continue;
+            if (!(strstr(e->d_name, ".PNG") || strstr(e->d_name, ".png"))) continue;
+            if (out[0] == 0 || strcmp(e->d_name, out) > 0) {
+                snprintf(out, cap, "%s", e->d_name);
+            }
+        }
+        closedir(dp);
+    }
+}
 
-static CFDataRef (*f_dataNew)(const void*, long);
-static const void *(*f_dataBytes)(CFDataRef);
-static long (*f_dataLen)(CFDataRef);
-static void (*f_cfRelease)(const void*);
-static CFStringRef (*f_str)(const void*, const char*, unsigned);
-static CFRef (*f_num)(const void*, long, const void*);
-static CFDictRef (*f_dict)(const void*, const void**, const void**, long, const void*, const void*);
-static const void *kCb;
+/* 在 DCIM 里拼出完整路径 */
+static int find_path(const char *name, char *out, size_t cap) {
+    const char *dirs[] = {
+        "/var/mobile/Media/DCIM/125APPLE",
+        "/var/mobile/Media/DCIM/124APPLE",
+        "/var/mobile/Media/DCIM/100APPLE",
+        NULL
+    };
+    for (int d = 0; dirs[d]; d++) {
+        snprintf(out, cap, "%s/%s", dirs[d], name);
+        if (access(out, R_OK) == 0) return 1;
+    }
+    return 0;
+}
 
-static void *(*f_destNew)(CFDataRef, CFStringRef, unsigned long, const void*);
-static void (*f_destAdd)(void*, CGImageRef, const void*);
-static int (*f_destFinal)(void*);
+static int load_hid(void) {
+    void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+    lg("[hid] IOKit=%p", iokit);
+    if (!iokit) return 0;
 
-static int g_ready = 0;
+    p_clientCreate   = dlsym(iokit, "IOHIDEventSystemClientCreate");
+    p_clientDispatch = dlsym(iokit, "IOHIDEventSystemClientDispatchEvent");
+    p_clientSetProp  = dlsym(iokit, "IOHIDEventSystemClientSetProperty");
+    p_kbdEvent       = dlsym(iokit, "IOHIDEventCreateKeyboardEvent");
+    p_eventCreate    = dlsym(iokit, "IOHIDEventCreate");
 
-static void load_syms(void) {
-    void *qc = dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_LAZY);
-    void *is = dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_LAZY);
-    void *cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
+    lg("[hid] clientCreate=%p dispatch=%p kbdEvent=%p",
+       (void*)p_clientCreate, (void*)p_clientDispatch, (void*)p_kbdEvent);
+    return p_clientCreate && p_clientDispatch && p_kbdEvent;
+}
+
+/* 派发一个按键事件：page/usage, down=1按下
+ * 用 IOHIDEventCreateKeyboardEvent，然后交给 HID system client 派发 */
+static void send_key(void *client, unsigned page, unsigned usage, int down) {
+    if (!p_kbdEvent || !client) return;
+    /* (allocator, timestamp, usagePage, usage, down, options) */
+    void *ev = p_kbdEvent(NULL, 0, page, usage, down ? 1 : 0, 0);
+    if (!ev) { lg("[hid] event null page=0x%x usage=0x%x", page, usage); return; }
+    p_clientDispatch(client, ev);
+}
+
+/* 模拟「电源 + 音量上」截图组合键 */
+static int trigger_screenshot(void) {
+    if (!p_clientCreate) { lg("[hid] not loaded"); return 0; }
+    void *client = p_clientCreate(NULL);
+    lg("[hid] client=%p", client);
+    if (!client) return 0;
+
+    /* AllowInstrumentation 让 client 能派发事件 */
     void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
-    void *io = dlopen("/System/Library/Frameworks/ImageIO.framework/ImageIO", RTLD_LAZY);
-    lg("[sym] qc=%p is=%p cg=%p cf=%p io=%p", qc, is, cg, cf, io);
+    void *(*boolOf)(int) = cf ? dlsym(cf, "CFBooleanGetValue") : NULL;
+    const void *kTrue = (cf ? dlsym(cf, "kCFBooleanTrue") : NULL);
+    (void)boolOf; (void)kTrue;
 
-    if (qc) f_render = dlsym(qc, "CARenderServerRenderDisplay");
-    if (is) {
-        f_surfCreate = dlsym(is, "IOSurfaceCreate");
-        f_surfBase   = dlsym(is, "IOSurfaceGetBaseAddress");
-        f_surfBPR    = dlsym(is, "IOSurfaceGetBytesPerRow");
-        f_surfW      = dlsym(is, "IOSurfaceGetWidth");
-        f_surfH      = dlsym(is, "IOSurfaceGetHeight");
-    }
-    if (cg) {
-        f_csRGB      = dlsym(cg, "CGColorSpaceCreateDeviceRGB");
-        f_csRelease  = dlsym(cg, "CGColorSpaceRelease");
-        f_bmpCtx     = dlsym(cg, "CGBitmapContextCreate");
-        f_ctxImage   = dlsym(cg, "CGBitmapContextCreateImage");
-        f_ctxRelease = dlsym(cg, "CGContextRelease");
-        f_imgRelease = dlsym(cg, "CGImageRelease");
-    }
-    if (cf) {
-        f_dataNew   = dlsym(cf, "CFDataCreateMutable");
-        f_dataBytes = dlsym(cf, "CFDataGetBytePtr");
-        f_dataLen   = dlsym(cf, "CFDataGetLength");
-        f_cfRelease = dlsym(cf, "CFRelease");
-        f_str       = dlsym(cf, "CFStringCreateWithCString");
-        f_num       = dlsym(cf, "CFNumberCreate");
-        f_dict      = dlsym(cf, "CFDictionaryCreate");
-        kCb         = (const void *)dlsym(cf, "kCFTypeDictionaryKeyCallBacks");
-    }
-    if (io) {
-        f_destNew   = dlsym(io, "CGImageDestinationCreateWithData");
-        f_destAdd   = dlsym(io, "CGImageDestinationAddImage");
-        f_destFinal = dlsym(io, "CGImageDestinationFinalize");
-    }
-    g_ready = f_render && f_surfCreate && f_surfBase && f_surfBPR &&
-              f_csRGB && f_bmpCtx && f_ctxImage && f_dataNew &&
-              f_dataBytes && f_dataLen && f_str && f_num && f_dict && kCb &&
-              f_destNew && f_destAdd && f_destFinal;
-    lg("[sym] ready=%d render=%p surfCreate=%p destNew=%p",
-       g_ready, (void*)f_render, (void*)f_surfCreate, (void*)f_destNew);
-}
-
-static void screen_size(size_t *w, size_t *h) {
-    *w = 1284; *h = 2778;
-    FILE *f = fopen("/var/mobile/dsh-screen-size.txt", "r");
-    if (f) { unsigned long a=0,b=0; if (fscanf(f,"%lu %lu",&a,&b)==2 && a&&b){*w=a;*h=b;} fclose(f); }
-}
-
-/* 返回 PNG（malloc，调用方 free），失败 NULL */
-static unsigned char *capture_png(size_t *outLen) {
-    *outLen = 0;
-    if (!g_ready) { lg("[cap] not ready"); return NULL; }
-
-    size_t W, H; screen_size(&W, &H);
-
-    CFStringRef kW  = f_str(NULL, "IOSurfaceWidth", 0x08000100);
-    CFStringRef kH  = f_str(NULL, "IOSurfaceHeight", 0x08000100);
-    CFStringRef kB  = f_str(NULL, "IOSurfaceBytesPerElement", 0x08000100);
-    CFStringRef kF  = f_str(NULL, "IOSurfacePixelFormat", 0x08000100);
-    CFStringRef kR  = f_str(NULL, "IOSurfaceBytesPerRow", 0x08000100);
-    CFStringRef kG  = f_str(NULL, "IOSurfaceIsGlobal", 0x08000100);
-    if (!kW || !kH || !kB || !kF || !kR || !kG) { lg("[cap] key str fail"); return NULL; }
-
-    int32_t vw=(int32_t)W, vh=(int32_t)H, vb=4, vr=(int32_t)(W*4), vg=1;
-    uint32_t vf=0x42475241;
-    CFRef nw=f_num(NULL,3,&vw), nh=f_num(NULL,3,&vh), nb=f_num(NULL,3,&vb);
-    CFRef nf=f_num(NULL,3,&vf), nr=f_num(NULL,3,&vr), ng=f_num(NULL,3,&vg);
-
-    const void *keys[6] = { kW, kH, kB, kF, kR, kG };
-    const void *vals[6] = { nw, nh, nb, nf, nr, ng };
-    CFDictRef props = f_dict(NULL, keys, vals, 6, kCb, kCb);
-    if (!props) { lg("[cap] dict fail"); return NULL; }
-
-    IOSurfaceRef surf = f_surfCreate(props);
-    if (!surf) { lg("[cap] IOSurfaceCreate FAIL %zux%zu", W, H); return NULL; }
-
-    size_t bw = f_surfW ? f_surfW(surf) : W;
-    size_t bh = f_surfH ? f_surfH(surf) : H;
-    size_t bpr = f_surfBPR(surf);
-    void *base = f_surfBase(surf);
-    lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw, bh, bpr, base);
-
-    CFStringRef lcd = f_str(NULL, "LCD", 0x08000100);
-    unsigned ctxTry[2] = { 0u, 1u };
-    size_t nz = 0;
-    for (int i = 0; i < 2; i++) {
-        f_render(ctxTry[i], lcd, surf);
-        usleep(120000);
-        nz = 0;
-        const unsigned char *p = (const unsigned char *)base;
-        size_t tot = bpr * bh;
-        if (p) for (size_t k = 0; k < tot; k += 53) if (p[k]) nz++;
-        lg("[cap] ctx=%u sampled-nonzero=%zu", ctxTry[i], nz);
-        if (nz > 50) break;
-    }
-
-    if (nz <= 50) { lg("[cap] still blank"); f_cfRelease(surf); return NULL; }
-
-    CGColorSpaceRef cs = f_csRGB();
-    CGContextRef c = f_bmpCtx(base, bw, bh, 8, bpr, cs,
-        1 | (2 << 12));
-    f_csRelease(cs);
-    if (!c) { lg("[cap] ctx fail"); f_cfRelease(surf); return NULL; }
-
-    CGImageRef ci = f_ctxImage(c);
-    f_ctxRelease(c);
-    if (!ci) { lg("[cap] image fail"); f_cfRelease(surf); return NULL; }
-
-    CFDataRef data = f_dataNew(NULL, 0);
-    CFStringRef pngType = f_str(NULL, "public.png", 0x08000100);
-    void *dest = f_destNew(data, pngType, 1, NULL);
-    unsigned char *out = NULL;
-    if (dest) {
-        f_destAdd(dest, ci, NULL);
-        if (f_destFinal(dest)) {
-            long len = f_dataLen(data);
-            const void *b = f_dataBytes(data);
-            if (len > 0 && b) {
-                out = malloc((size_t)len);
-                if (out) { memcpy(out, b, (size_t)len); *outLen = (size_t)len; }
+    if (p_clientSetProp && cf) {
+        const void *kbn = (const void *)dlsym(cf, "kCFBooleanTrue");
+        if (kbn) {
+            CFStringRef (*mkstr)(const void*, const char*, unsigned) = dlsym(cf, "CFStringCreateWithCString");
+            if (mkstr) {
+                const void *key = mkstr(NULL, "AllowInstrumentation", 0x08000100);
+                p_clientSetProp(client, key, kbn);
+                lg("[hid] AllowInstrumentation set");
             }
         }
     }
-    lg("[cap] png len=%zu", *outLen);
-    f_imgRelease(ci);
-    f_cfRelease(surf);
-    return out;
+
+    /* Consumer page = 0x0C；Power = 0x30；Volume Increment = 0xE9 */
+    const unsigned PAGE = 0x0C, POWER = 0x30, VOLUP = 0xE9;
+
+    lg("[hid] press power");
+    send_key(client, PAGE, POWER, 1);
+    usleep(20000);
+    lg("[hid] press volup");
+    send_key(client, PAGE, VOLUP, 1);
+    usleep(60000);
+    lg("[hid] release volup");
+    send_key(client, PAGE, VOLUP, 0);
+    usleep(20000);
+    lg("[hid] release power");
+    send_key(client, PAGE, POWER, 0);
+
+    return 1;
 }
 
+// ---- HTTP ----
 static void reply(int fd, int code, const char *reason, const char *ctype,
                   const void *body, size_t blen) {
     char hdr[320];
@@ -215,6 +158,42 @@ static void reply(int fd, int code, const char *reason, const char *ctype,
         const unsigned char *p = body; size_t left = blen;
         while (left) { ssize_t n = send(fd, p, left, 0); if (n <= 0) break; p += n; left -= (size_t)n; }
     }
+}
+
+static unsigned char *capture_png(size_t *outLen) {
+    *outLen = 0;
+
+    char base[256] = {0};
+    newest_png(base, sizeof(base));
+    lg("[cap] baseline=%s", base);
+
+    if (!trigger_screenshot()) { lg("[cap] trigger failed"); return NULL; }
+
+    char now[256] = {0};
+    char path[512] = {0};
+    int found = 0;
+    for (int i = 0; i < 50; i++) {
+        usleep(100000);
+        now[0] = 0;
+        newest_png(now, sizeof(now));
+        if (now[0] && strcmp(now, base) != 0) {
+            if (find_path(now, path, sizeof(path))) { found = 1; break; }
+        }
+    }
+    if (!found) { lg("[cap] no new file after 5s"); return NULL; }
+    lg("[cap] new file %s", path);
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { lg("[cap] open fail"); return NULL; }
+    fseek(fp, 0, SEEK_END);
+    long len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (len <= 0) { fclose(fp); return NULL; }
+    unsigned char *buf = malloc((size_t)len);
+    if (buf && fread(buf, 1, (size_t)len, fp) != (size_t)len) { free(buf); buf = NULL; }
+    fclose(fp);
+    if (buf) { *outLen = (size_t)len; lg("[cap] png %zu bytes", *outLen); }
+    return buf;
 }
 
 static void handle(int fd) {
@@ -240,7 +219,8 @@ static void *server_thread(void *arg) {
     (void)arg;
     sleep(8);
     lg("[svc] start uid=%d pid=%d", getuid(), getpid());
-    load_syms();
+    int hidok = load_hid();
+    lg("[svc] hid ready=%d", hidok);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { lg("[svc] socket errno=%d", errno); return NULL; }
