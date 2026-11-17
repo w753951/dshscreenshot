@@ -15,6 +15,8 @@
  */
 
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 #import <Foundation/Foundation.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -65,6 +67,31 @@ static UICollectionView *dsh_collectionFor(UIView *v) {
 
 #pragma mark - 点击
 
+/* 直接调用手势识别器自己的 target/action —— 最贴近真实点击 */
+static BOOL dsh_fire_gesture(UIGestureRecognizer *g) {
+    if (!g) return NO;
+    Ivar iv = class_getInstanceVariable([UIGestureRecognizer class], "_targets");
+    if (!iv) return NO;
+    NSArray *targets = (__bridge NSArray *)object_getIvar(g, iv);
+    if (![targets isKindOfClass:[NSArray class]] || targets.count == 0) return NO;
+
+    for (id t in targets) {
+        Class tc = object_getClass(t);
+        Ivar tt = class_getInstanceVariable(tc, "_target");
+        Ivar ta = class_getInstanceVariable(tc, "_action");
+        if (!tt || !ta) continue;
+        id target = object_getIvar(t, tt);
+        SEL action = (SEL)object_getIvar(t, ta);
+        if (target && action && [target respondsToSelector:action]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(target, action, g);
+            lg(@"fired gesture %@ on %@ -> %@", NSStringFromClass([g class]),
+               NSStringFromClass([target class]), NSStringFromSelector(action));
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static NSString *dsh_tap(double nx, double ny) {
     __block NSString *result = @"no-window";
     void (^work)(void) = ^{
@@ -79,12 +106,26 @@ static NSString *dsh_tap(double nx, double ny) {
         CGPoint p = CGPointMake(nx * sz.width, ny * sz.height);
         UIView *v = dsh_hit(win, p);
         if (!v) { result = @"no-view"; return; }
+        lg(@"hit %.0f,%.0f -> %@", p.x, p.y, NSStringFromClass([v class]));
 
-        NSString *cls = NSStringFromClass([v class]);
-        lg(@"hit %.0f,%.0f -> %@", p.x, p.y, cls);
-
-        /* 1) UIControl：直接触发 action */
+        /* 1) 手势优先：从命中视图往上，找 tap 手势并触发它的 target/action */
         UIView *cur = v;
+        int depth = 0;
+        while (cur && depth < 12) {
+            for (UIGestureRecognizer *g in cur.gestureRecognizers) {
+                if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+                if (!g.enabled) continue;
+                if (dsh_fire_gesture(g)) {
+                    result = [NSString stringWithFormat:@"gesture:%@", NSStringFromClass([g class])];
+                    return;
+                }
+            }
+            cur = cur.superview;
+            depth++;
+        }
+
+        /* 2) UIControl：sendActions */
+        cur = v;
         while (cur) {
             if ([cur isKindOfClass:[UIControl class]]) {
                 [(UIControl *)cur sendActionsForControlEvents:UIControlEventTouchUpInside];
@@ -94,57 +135,53 @@ static NSString *dsh_tap(double nx, double ny) {
             cur = cur.superview;
         }
 
-        /* 2) 列表 cell：调 delegate */
+        /* 3) 列表：先 selectRow，再兜底 delegate */
         cur = v;
         while (cur) {
             if ([cur isKindOfClass:[UITableViewCell class]]) {
                 UITableView *tv = dsh_tableFor(cur);
                 NSIndexPath *ip = tv ? [tv indexPathForCell:(UITableViewCell *)cur] : nil;
                 if (tv && ip) {
+                    [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
                     id<UITableViewDelegate> del = tv.delegate;
                     if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
                         [del tableView:tv didSelectRowAtIndexPath:ip];
-                        result = [NSString stringWithFormat:@"table-row:%ld-%ld", (long)ip.section, (long)ip.row];
-                        return;
                     }
+                    result = [NSString stringWithFormat:@"table-row:%ld-%ld", (long)ip.section, (long)ip.row];
+                    return;
                 }
             }
             if ([cur isKindOfClass:[UICollectionViewCell class]]) {
                 UICollectionView *cv = dsh_collectionFor(cur);
                 NSIndexPath *ip = cv ? [cv indexPathForCell:(UICollectionViewCell *)cur] : nil;
                 if (cv && ip) {
+                    [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
                     id<UICollectionViewDelegate> del = cv.delegate;
                     if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
                         [del collectionView:cv didSelectItemAtIndexPath:ip];
-                        result = [NSString stringWithFormat:@"collection-item:%ld-%ld", (long)ip.section, (long)ip.item];
-                        return;
                     }
+                    result = [NSString stringWithFormat:@"collection-item:%ld-%ld", (long)ip.section, (long)ip.item];
+                    return;
                 }
             }
             cur = cur.superview;
         }
 
-        /* 3) 手势识别器兜底：手动触发其 action */
+        /* 4) 任意手势兜底（非 tap 的也试一遍） */
         cur = v;
-        int depth = 0;
+        depth = 0;
         while (cur && depth < 12) {
             for (UIGestureRecognizer *g in cur.gestureRecognizers) {
-                if (g.enabled && g.state == UIGestureRecognizerStatePossible) {
-                    /* 让 recognizer 自己走一遍：切到 began/ended */
-                    SEL s = NSSelectorFromString(@"setState:");
-                    if ([g respondsToSelector:s]) {
-                        ((void (*)(id, SEL, NSInteger))objc_msgSend)(g, s, UIGestureRecognizerStateBegan);
-                        ((void (*)(id, SEL, NSInteger))objc_msgSend)(g, s, UIGestureRecognizerStateEnded);
-                        result = [NSString stringWithFormat:@"gesture:%@", NSStringFromClass([g class])];
-                        return;
-                    }
+                if (dsh_fire_gesture(g)) {
+                    result = [NSString stringWithFormat:@"gesture-any:%@", NSStringFromClass([g class])];
+                    return;
                 }
             }
             cur = cur.superview;
             depth++;
         }
 
-        result = [NSString stringWithFormat:@"no-action:%@", cls];
+        result = [NSString stringWithFormat:@"no-action:%@", NSStringFromClass([v class])];
     };
 
     if ([NSThread isMainThread]) work();
