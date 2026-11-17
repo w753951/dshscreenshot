@@ -23,6 +23,10 @@ static const int  kPort = 47191;
 static const char *kKey = "dsh-go-screen-v1";
 static const char *kLog = "/var/mobile/dsh-screen-plugin.log";
 
+/* 抓屏压缩开关：/capture?fmt=jpeg&q=0.4 生效 */
+static int    gJpeg    = 0;
+static double gQuality = 0.4;
+
 static void lg(const char *fmt, ...) {
     FILE *f = fopen(kLog, "a");
     if (!f) return;
@@ -77,19 +81,33 @@ static void cap_body(void *p) {
     if (!dataNew || !dataBytes || !dataLen || !strCreate || !destNew || !destAdd || !destFinal) return;
 
     CFDataRef data = dataNew(NULL, 0);
-    void *pngType = strCreate(NULL, "public.png", 0x08000100);
-    void *dest = destNew(data, pngType, 1, NULL);
-    lg("[core] data=%p dest=%p", (void*)data, dest);
+    void *imgType = strCreate(NULL, gJpeg ? "public.jpeg" : "public.png", 0x08000100);
+    void *dest = destNew(data, imgType, 1, NULL);
+    lg("[core] data=%p dest=%p jpeg=%d q=%.2f", (void*)data, dest, gJpeg, gQuality);
     if (!dest) return;
 
-    destAdd(dest, cgImage, NULL);
+    void *props = NULL;
+    if (gJpeg) {
+        void *(*dictCreate)(const void *, const void **, const void **, long, const void *, const void *) =
+            dlsym(cf, "CFDictionaryCreate");
+        void *(*numCreate)(const void *, long, const void *) = dlsym(cf, "CFNumberCreate");
+        void *qKeySym = dlsym(io, "kCGImageDestinationLossyCompressionQuality");
+        if (dictCreate && numCreate && qKeySym) {
+            void *qKey = *(void **)qKeySym;
+            void *qNum = numCreate(NULL, 13 /* kCFNumberDoubleType */, &gQuality);
+            const void *keys[1] = { qKey };
+            const void *vals[1] = { qNum };
+            props = dictCreate(NULL, keys, vals, 1, NULL, NULL);
+        }
+    }
+    destAdd(dest, cgImage, props);
     int ok = destFinal(dest);
     lg("[core] finalize=%d", ok);
     if (!ok) return;
 
     long len = dataLen(data);
     const void *b = dataBytes(data);
-    lg("[core] png len=%ld", len);
+    lg("[core] img len=%ld jpeg=%d", len, gJpeg);
     if (len <= 8 || !b) return;
 
     unsigned char *buf = malloc((size_t)len);
@@ -498,11 +516,21 @@ static void handle(int fd) {
     }
     if (!strstr(buf, "GET /capture")) { reply(fd,400,"Bad Request","text/plain","Unavailable",11); close(fd); return; }
 
+    /* 压缩：/capture?fmt=jpeg&q=0.4  —— 默认仍是 PNG */
+    gJpeg = (strstr(buf, "fmt=jpeg") != NULL) || (strstr(buf, "fmt=jpg") != NULL);
+    {
+        const char *qp = strstr(buf, "q=");
+        if (qp) {
+            double v = atof(qp + 2);
+            if (v > 0.05 && v <= 1.0) gQuality = v;
+        }
+    }
+
     size_t len = 0;
     unsigned char *png = capture_png(&len);
     if (!png) { reply(fd,503,"Service Unavailable","text/plain","nocapture",9); close(fd); return; }
-    reply(fd, 200, "OK", "image/png", png, len);
-    lg("[http] 200 png %zu", len);
+    reply(fd, 200, "OK", gJpeg ? "image/jpeg" : "image/png", png, len);
+    lg("[http] 200 %s %zu q=%.2f", gJpeg ? "jpeg" : "png", len, gQuality);
     free(png);
     close(fd);
 }
