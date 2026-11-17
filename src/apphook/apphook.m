@@ -1,17 +1,25 @@
 /*
- * DshAppHook —— 进程内 UI 点击（不走 HID）
+ * DshAppHook —— 进程内 UI 操作（不走 HID）
  *
- * 注入目标 App（plist 里配 Bundles），提供 HTTP：
- *   GET /tap?x=<0..1>&y=<0..1>&key=dsh-go-screen-v1
- *   GET /swipe?...（用 setContentOffset 滚动）
- *   GET /info
+ * 注入目标 App（plist 里配 WBundles），提供 HTTP 服务：
  *
- * 原理：在 App 自己的进程里 hitTest 找到视图，然后
- *   - UIControl → sendActionsForControlEvents:UIControlEventTouchUpInside
- *   - UITableViewCell → 调 delegate 的 tableView:didSelectRowAtIndexPath:
- *   - UICollectionViewCell → 调 collectionView:didSelectItemAtIndexPath:
- *   - 其它 → 遍历 gestureRecognizers，触发其 target/action
- * 这是进程内调用，不需要任何系统权限。
+ *   GET /info                                  pid / windows
+ *   GET /list                                  列出可见行：section-row | 文本
+ *   GET /tree?all=1                            视图树：depth|class|x,y,w,h|可点|文本
+ *   GET /tap?x=<0..1>&y=<0..1>[&mode=N]        归一化坐标点击（红圈可视化）
+ *   GET /tap_row?s=&r=                         按 indexPath 点行（零坐标）
+ *   GET /type?text=你好                        往当前输入框写文字
+ *   GET /press?title=发送                      按标题触发 UIButton
+ *   GET /scroll?dy=<pt>                         直接改 contentOffset 滚动
+ *   GET /scrollTo?text=神奇[&dy=]               滚动直到目标行出现（找不到就翻页找死循环上限 12 次）
+ *
+ * 为什么不用 IOHIDEvent：
+ *   iOS 15 + XinaA15 上，从 root CLI / App 进程用 IOHIDEventSystemClient 派发事件，
+ *   返回 rc=0 但界面零反应（连 dshctl home 都不回主屏），senderID / backboard 路由被拦。
+ *   只有「进程内直接调用 UIKit」才生效，这也是唯一稳的路。
+ *
+ * 红点：以前用独立 UIWindow(windowLevel=1e7)，iOS 13+ 多 scene 下没 bind windowScene
+ *   就根本不显示。现在改成挂到当前 keyWindow 最上层，tag=0xD5D0，0.9 秒自消。
  */
 
 #import <UIKit/UIKit.h>
@@ -40,257 +48,75 @@ static void lg(NSString *fmt, ...) {
     if (f) { fputs([line UTF8String], f); fclose(f); }
 }
 
-#pragma mark - 视图查找
-
-static UIView *dsh_hit(UIWindow *win, CGPoint p) {
-    UIView *v = [win hitTest:p withEvent:nil];
-    return v;
+static void onMain(void (^blk)(void)) {
+    if ([NSThread isMainThread]) blk();
+    else dispatch_sync(dispatch_get_main_queue(), blk);
 }
 
-static UITableView *dsh_tableFor(UIView *v) {
-    UIView *cur = v;
-    while (cur) {
-        if ([cur isKindOfClass:[UITableView class]]) return (UITableView *)cur;
-        cur = cur.superview;
+#pragma mark - window
+
+static UIWindow *dsh_window(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    for (UIWindow *w in app.windows) {
+        if (w.isKeyWindow && !w.isHidden && w.alpha > 0.01) return w;
     }
-    return nil;
-}
-
-static UICollectionView *dsh_collectionFor(UIView *v) {
-    UIView *cur = v;
-    while (cur) {
-        if ([cur isKindOfClass:[UICollectionView class]]) return (UICollectionView *)cur;
-        cur = cur.superview;
+    UIWindow *best = nil;
+    for (UIWindow *w in app.windows) {
+        if (w.isHidden || w.alpha < 0.01) continue;
+        if (w.bounds.size.width <= 1) continue;
+        if (!best || w.windowLevel >= best.windowLevel) best = w;
     }
-    return nil;
-}
-
-#pragma mark - 点击
-
-/* 直接调用手势识别器自己的 target/action —— 最贴近真实点击 */
-static BOOL dsh_fire_gesture(UIGestureRecognizer *g) {
-    if (!g) return NO;
-    Ivar iv = class_getInstanceVariable([UIGestureRecognizer class], "_targets");
-    if (!iv) return NO;
-    NSArray *targets = (NSArray *)object_getIvar((id)g, iv);
-    if (![targets isKindOfClass:[NSArray class]] || targets.count == 0) return NO;
-
-    for (id t in targets) {
-        Class tc = object_getClass(t);
-        Ivar tt = class_getInstanceVariable(tc, "_target");
-        Ivar ta = class_getInstanceVariable(tc, "_action");
-        if (!tt || !ta) continue;
-        id target = object_getIvar(t, tt);
-        SEL action = (SEL)(__bridge void *)object_getIvar(t, ta);
-        if (target && action && [target respondsToSelector:action]) {
-            ((void (*)(id, SEL, id))objc_msgSend)(target, action, g);
-            lg(@"fired gesture %@ on %@ -> %@", NSStringFromClass([g class]),
-               NSStringFromClass([target class]), NSStringFromSelector(action));
-            return YES;
+    if (best) return best;
+    for (UIScene *s in app.connectedScenes) {
+        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+            if (w.isKeyWindow) return w;
+            if (!best) best = w;
         }
     }
-    return NO;
+    return best ?: app.windows.firstObject;
 }
 
-/* 收集 cell 里的文字，便于确认点到了哪一行 */
-static NSString *dsh_cell_text(UIView *cell) {
-    NSMutableArray *parts = [NSMutableArray array];
-    NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
-    int guard = 0;
-    while (stack.count && guard++ < 400) {
-        UIView *v = stack.lastObject;
-        [stack removeLastObject];
-        if ([v isKindOfClass:[UILabel class]]) {
-            NSString *t = ((UILabel *)v).text;
-            if (t.length) [parts addObject:t];
-        } else if ([v isKindOfClass:[UITextView class]]) {
-            NSString *t = ((UITextView *)v).text;
-            if (t.length) [parts addObject:t];
-        }
-        [stack addObjectsFromArray:v.subviews];
+#pragma mark - 文本
+
+static NSString *dsh_view_text(UIView *v) {
+    NSString *t = nil;
+    if ([v isKindOfClass:[UILabel class]]) {
+        t = ((UILabel *)v).text;
+    } else if ([v isKindOfClass:[UIButton class]]) {
+        UIButton *b = (UIButton *)v;
+        t = [b titleForState:UIControlStateNormal] ?: b.currentTitle;
+    } else if ([v isKindOfClass:[UITextField class]]) {
+        UITextField *tf = (UITextField *)v;
+        t = tf.text.length ? tf.text : tf.placeholder;
+    } else if ([v isKindOfClass:[UITextView class]]) {
+        t = ((UITextView *)v).text;
     }
-    NSString *joined = [parts componentsJoinedByString:@" | "];
-    if (joined.length > 80) joined = [joined substringToIndex:80];
-    return joined.length ? joined : @"(空)";
-}
-
-/* 在整棵子树里找手势并触发 */
-static BOOL dsh_fire_gesture_tree(UIView *root, int maxDepth) {
-    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
-    int guard = 0;
-    while (stack.count && guard++ < 300) {
-        UIView *v = stack.lastObject;
-        [stack removeLastObject];
-        for (UIGestureRecognizer *g in v.gestureRecognizers) {
-            if ([g isKindOfClass:[UITapGestureRecognizer class]] && dsh_fire_gesture(g)) return YES;
+    if (!t.length) {
+        static NSString *keys[] = { @"text", @"title", @"attributedText" };
+        for (int i = 0; i < 3; i++) {
+            if (![v respondsToSelector:NSSelectorFromString(keys[i])]) continue;
+            @try {
+                id o = [v valueForKey:keys[i]];
+                if ([o isKindOfClass:[NSString class]] && [o length]) { t = o; break; }
+                if ([o isKindOfClass:[NSAttributedString class]] && [o length]) { t = [o string]; break; }
+            } @catch (__unused NSException *e) {}
         }
-        if (maxDepth > 0) [stack addObjectsFromArray:v.subviews];
     }
-    return NO;
+    return t;
 }
 
-#pragma mark - 点击位置可视化
-
-/* 在目标位置闪一个半透明红圈，0.9 秒消失。
-   注意：不要再建独立 UIWindow（会抢 key window，微信里容易黑屏/崩），
-   直接挂到当前 key window 的最上层。 */
-static void dsh_show_dot(CGPoint p) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *win = nil;
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (w.isKeyWindow) { win = w; break; }
-        }
-        if (!win) win = [UIApplication sharedApplication].windows.firstObject;
-        if (!win) return;
-        [[win viewWithTag:0xD5D0] removeFromSuperview];
-        CGFloat R = 20.0;
-        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(p.x - R, p.y - R, R * 2, R * 2)];
-        dot.tag = 0xD5D0;
-        dot.userInteractionEnabled = NO;
-        dot.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.55];
-        dot.layer.cornerRadius = R;
-        dot.layer.borderWidth = 2.0;
-        dot.layer.borderColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.9].CGColor;
-        [win addSubview:dot];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            [dot removeFromSuperview];
-        });
-        lg(@"dot at %.0f,%.0f", p.x, p.y);
-    });
-}
-
-static NSString *dsh_tap(double nx, double ny) {
-    __block NSString *result = @"no-window";
-    void (^work)(void) = ^{
-        UIWindow *win = nil;
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (w.isKeyWindow) { win = w; break; }
-        }
-        if (!win) win = [UIApplication sharedApplication].windows.firstObject;
-        if (!win) return;
-
-        CGSize sz = win.bounds.size;
-        CGPoint p = CGPointMake(nx * sz.width, ny * sz.height);
-        dsh_show_dot(p);
-        UIView *v = dsh_hit(win, p);
-        if (!v) { result = @"no-view"; return; }
-        lg(@"hit %.0f,%.0f -> %@", p.x, p.y, NSStringFromClass([v class]));
-
-        /* 1) 手势优先：从命中视图往上，找 tap 手势并触发它的 target/action */
-        UIView *cur = v;
-        int depth = 0;
-        while (cur && depth < 12) {
-            for (UIGestureRecognizer *g in cur.gestureRecognizers) {
-                if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
-                if (!g.enabled) continue;
-                if (dsh_fire_gesture(g)) {
-                    result = [NSString stringWithFormat:@"gesture:%@", NSStringFromClass([g class])];
-                    return;
-                }
-            }
-            cur = cur.superview;
-            depth++;
-        }
-
-        /* 2) UIControl：sendActions */
-        cur = v;
-        while (cur) {
-            if ([cur isKindOfClass:[UIControl class]]) {
-                [(UIControl *)cur sendActionsForControlEvents:UIControlEventTouchUpInside];
-                result = [NSString stringWithFormat:@"control:%@", NSStringFromClass([cur class])];
-                return;
-            }
-            cur = cur.superview;
-        }
-
-        /* 3) 列表：优先 cell 内部手势，再 selectRow + delegate；同时回传会话名 */
-        cur = v;
-        while (cur) {
-            if ([cur isKindOfClass:[UITableViewCell class]] || [cur isKindOfClass:[UICollectionViewCell class]]) {
-                NSString *txt = dsh_cell_text(cur);
-                /* 3a) cell 子树上的手势 */
-                if (dsh_fire_gesture_tree(cur, 8)) {
-                    result = [NSString stringWithFormat:@"cell-gesture:%@", txt];
-                    return;
-                }
-                /* 3b) selectRow + delegate */
-                if ([cur isKindOfClass:[UITableViewCell class]]) {
-                    UITableView *tv = dsh_tableFor(cur);
-                    NSIndexPath *ip = tv ? [tv indexPathForCell:(UITableViewCell *)cur] : nil;
-                    if (tv && ip) {
-                        [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
-                        id<UITableViewDelegate> del = tv.delegate;
-                        if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
-                            [del tableView:tv didSelectRowAtIndexPath:ip];
-                        }
-                        result = [NSString stringWithFormat:@"table-row:%@", txt];
-                        return;
-                    }
-                } else {
-                    UICollectionView *cv = dsh_collectionFor(cur);
-                    NSIndexPath *ip = cv ? [cv indexPathForCell:(UICollectionViewCell *)cur] : nil;
-                    if (cv && ip) {
-                        [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
-                        id<UICollectionViewDelegate> del = cv.delegate;
-                        if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-                            [del collectionView:cv didSelectItemAtIndexPath:ip];
-                        }
-                        result = [NSString stringWithFormat:@"collection-item:%@", txt];
-                        return;
-                    }
-                }
-            }
-            cur = cur.superview;
-        }
-
-        /* 4) 任意手势兜底（非 tap 的也试一遍） */
-        cur = v;
-        depth = 0;
-        while (cur && depth < 12) {
-            for (UIGestureRecognizer *g in cur.gestureRecognizers) {
-                if (dsh_fire_gesture(g)) {
-                    result = [NSString stringWithFormat:@"gesture-any:%@", NSStringFromClass([g class])];
-                    return;
-                }
-            }
-            cur = cur.superview;
-            depth++;
-        }
-
-        result = [NSString stringWithFormat:@"no-action:%@", NSStringFromClass([v class])];
-    };
-
-    if ([NSThread isMainThread]) work();
-    else dispatch_sync(dispatch_get_main_queue(), work);
-    return result;
-}
-
-#pragma mark - HTTP
-
-static void reply(int fd, int code, const char *reason, const char *ctype, const char *body) {
-    char hdr[256];
-    size_t n = strlen(body);
-    int hl = snprintf(hdr, sizeof(hdr),
-                      "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-                      code, reason, ctype, n);
-    send(fd, hdr, hl, 0);
-    send(fd, body, n, 0);
-}
-
-static double qnum(const char *req, const char *name, double def) {
-    char pat[32]; snprintf(pat, sizeof(pat), "%s=", name);
-    const char *p = strstr(req, pat);
-    return p ? atof(p + strlen(pat)) : def;
+static NSArray *dsh_all_windows(void) {
+    return [UIApplication sharedApplication].windows ?: @[];
 }
 
 /* 所有可见 UITableView / UICollectionView */
 static NSArray *dsh_all_tables(void) {
     NSMutableArray *out = [NSMutableArray array];
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+    for (UIWindow *w in dsh_all_windows()) {
         NSMutableArray *stack = [NSMutableArray arrayWithObject:w];
         int g = 0;
-        while (stack.count && g++ < 3000) {
+        while (stack.count && g++ < 4000) {
             UIView *v = stack.lastObject;
             [stack removeLastObject];
             if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
@@ -302,100 +128,321 @@ static NSArray *dsh_all_tables(void) {
     return out;
 }
 
-/* 列出可见行：section-row | 文本 */
-static NSString *dsh_list(void) {
-    __block NSString *out = @"";
-    void (^work)(void) = ^{
-        NSMutableString *s = [NSMutableString string];
-        for (id tv in dsh_all_tables()) {
-            if ([tv isKindOfClass:[UITableView class]]) {
-                UITableView *t = tv;
-                for (UITableViewCell *c in t.visibleCells) {
-                    NSIndexPath *ip = [t indexPathForCell:c];
-                    if (!ip) continue;
-                    [s appendFormat:@"%ld-%ld | %@\n", (long)ip.section, (long)ip.row, dsh_cell_text(c)];
+/* cell 里的文字，用 | 连起来，截到 100 字 */
+static NSString *dsh_cell_text(UIView *cell) {
+    NSMutableArray *parts = [NSMutableArray array];
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:cell];
+    int guard = 0;
+    while (stack.count && guard++ < 500) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        NSString *t = dsh_view_text(v);
+        if (t.length) [parts addObject:t];
+        [stack addObjectsFromArray:v.subviews];
+    }
+    NSString *joined = [parts componentsJoinedByString:@" | "];
+    if (joined.length > 100) joined = [joined substringToIndex:100];
+    return joined.length ? joined : @"(空)";
+}
+
+#pragma mark - 红圈
+
+static void dsh_dot(CGPoint p) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *win = dsh_window();
+        if (!win) return;
+        [[win viewWithTag:0xD5D0] removeFromSuperview];
+        CGFloat R = 22.0;
+        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(p.x - R, p.y - R, R * 2, R * 2)];
+        dot.tag = 0xD5D0;
+        dot.userInteractionEnabled = NO;
+        dot.backgroundColor = [UIColor colorWithRed:1.0 green:0.1 blue:0.15 alpha:0.45];
+        dot.layer.cornerRadius = R;
+        dot.layer.borderWidth = 3.0;
+        dot.layer.borderColor = [UIColor colorWithRed:1.0 green:0.1 blue:0.15 alpha:0.95].CGColor;
+        [win addSubview:dot];
+        lg(@"dot %.0f,%.0f on %@", p.x, p.y, NSStringFromClass([win class]));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ [dot removeFromSuperview]; });
+    });
+}
+
+#pragma mark - 手势
+
+static BOOL dsh_fire_gesture(UIGestureRecognizer *g) {
+    if (!g) return NO;
+    Ivar iv = class_getInstanceVariable([UIGestureRecognizer class], "_targets");
+    if (!iv) return NO;
+    NSArray *targets = (NSArray *)object_getIvar((id)g, iv);
+    if (![targets isKindOfClass:[NSArray class]] || !targets.count) return NO;
+
+    for (id t in targets) {
+        Class tc = object_getClass(t);
+        Ivar tt = class_getInstanceVariable(tc, "_target");
+        Ivar ta = class_getInstanceVariable(tc, "_action");
+        if (!tt || !ta) continue;
+        id target = object_getIvar(t, tt);
+        SEL action = (SEL)(__bridge void *)object_getIvar(t, ta);
+        if (target && action && [target respondsToSelector:action]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(target, action, g);
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL dsh_fire_gesture_tree(UIView *root, int maxDepth) {
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    int guard = 0;
+    while (stack.count && guard++ < 400) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if ([g isKindOfClass:[UITapGestureRecognizer class]] && dsh_fire_gesture(g)) return YES;
+        }
+        if (maxDepth > 0) [stack addObjectsFromArray:v.subviews];
+    }
+    return NO;
+}
+
+#pragma mark - 点击
+
+static NSString *dsh_tap(double nx, double ny) {
+    __block NSString *result = @"no-window";
+    onMain(^{
+        UIWindow *win = dsh_window();
+        if (!win) return;
+        CGSize sz = win.bounds.size;
+        CGPoint p = CGPointMake(nx * sz.width, ny * sz.height);
+        dsh_dot(p);
+
+        UIView *v = [win hitTest:p withEvent:nil];
+        if (!v) { result = @"no-view"; return; }
+        lg(@"hit %.0f,%.0f -> %@", p.x, p.y, NSStringFromClass([v class]));
+
+        /* 1) tap 手势 */
+        UIView *cur = v; int depth = 0;
+        while (cur && depth++ < 12) {
+            for (UIGestureRecognizer *g in cur.gestureRecognizers) {
+                if (![g isKindOfClass:[UITapGestureRecognizer class]] || !g.enabled) continue;
+                if (dsh_fire_gesture(g)) {
+                    result = [NSString stringWithFormat:@"gesture:%@", NSStringFromClass([g class])];
+                    return;
                 }
-            } else {
-                UICollectionView *t = tv;
-                for (UICollectionViewCell *c in t.visibleCells) {
-                    NSIndexPath *ip = [t indexPathForCell:c];
-                    if (!ip) continue;
-                    [s appendFormat:@"%ld-%ld | %@\n", (long)ip.section, (long)ip.item, dsh_cell_text(c)];
+            }
+            cur = cur.superview;
+        }
+
+        /* 2) UIControl */
+        for (cur = v; cur; cur = cur.superview) {
+            if ([cur isKindOfClass:[UIControl class]]) {
+                [(UIControl *)cur sendActionsForControlEvents:UIControlEventTouchUpInside];
+                result = [NSString stringWithFormat:@"control:%@", NSStringFromClass([cur class])];
+                return;
+            }
+        }
+
+        /* 3) 列表 cell */
+        for (cur = v; cur; cur = cur.superview) {
+            if ([cur isKindOfClass:[UITableViewCell class]]) {
+                NSString *txt = dsh_cell_text(cur);
+                if (dsh_fire_gesture_tree(cur, 8)) {
+                    result = [NSString stringWithFormat:@"cell-gesture:%@", txt];
+                    return;
+                }
+                UIView *pv = cur.superview;
+                while (pv && ![pv isKindOfClass:[UITableView class]]) pv = pv.superview;
+                UITableView *tv = (UITableView *)pv;
+                NSIndexPath *ip = tv ? [tv indexPathForCell:(UITableViewCell *)cur] : nil;
+                if (tv && ip) {
+                    [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+                    id<UITableViewDelegate> del = tv.delegate;
+                    if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                        [del tableView:tv didSelectRowAtIndexPath:ip];
+                    }
+                    result = [NSString stringWithFormat:@"table-row:%@", txt];
+                    return;
+                }
+            }
+            if ([cur isKindOfClass:[UICollectionViewCell class]]) {
+                NSString *txt = dsh_cell_text(cur);
+                UIView *pv = cur.superview;
+                while (pv && ![pv isKindOfClass:[UICollectionView class]]) pv = pv.superview;
+                UICollectionView *cv = (UICollectionView *)pv;
+                NSIndexPath *ip = cv ? [cv indexPathForCell:(UICollectionViewCell *)cur] : nil;
+                if (cv && ip) {
+                    [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+                    id<UICollectionViewDelegate> del = cv.delegate;
+                    if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                        [del collectionView:cv didSelectItemAtIndexPath:ip];
+                    }
+                    result = [NSString stringWithFormat:@"collection-item:%@", txt];
+                    return;
                 }
             }
         }
-        out = s.length ? s : @"(empty)";
-    };
-    if ([NSThread isMainThread]) work();
-    else dispatch_sync(dispatch_get_main_queue(), work);
-    return out;
+
+        /* 4) 任意手势兜底 */
+        cur = v; depth = 0;
+        while (cur && depth++ < 12) {
+            for (UIGestureRecognizer *g in cur.gestureRecognizers) {
+                if (dsh_fire_gesture(g)) {
+                    result = [NSString stringWithFormat:@"gesture-any:%@", NSStringFromClass([g class])];
+                    return;
+                }
+            }
+            cur = cur.superview;
+        }
+
+        result = [NSString stringWithFormat:@"no-action:%@", NSStringFromClass([v class])];
+    });
+    return result;
 }
 
-/* 按 indexPath 点一行 */
+/* 按 indexPath 精确点行 */
 static NSString *dsh_tap_row(long sec, long row) {
     __block NSString *out = @"not-found";
-    void (^work)(void) = ^{
+    onMain(^{
         NSIndexPath *want = [NSIndexPath indexPathForRow:row inSection:sec];
         for (id tv in dsh_all_tables()) {
             if ([tv isKindOfClass:[UITableView class]]) {
-                UITableView *t = tv;
-                if (row < (long)[t numberOfRowsInSection:sec]) {
-                    [t selectRowAtIndexPath:want animated:NO scrollPosition:UITableViewScrollPositionNone];
-                    id<UITableViewDelegate> del = t.delegate;
-                    if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
-                        [del tableView:t didSelectRowAtIndexPath:want];
-                    }
-                    UITableViewCell *c = [t cellForRowAtIndexPath:want];
-                    out = [NSString stringWithFormat:@"row:%@", c ? dsh_cell_text(c) : @"?"];
-                    return;
+                UITableView *t = (UITableView *)tv;
+                if (sec >= (long)[t numberOfSections]) continue;
+                if (row >= (long)[t numberOfRowsInSection:sec]) continue;
+                UITableViewCell *c = [t cellForRowAtIndexPath:want];
+                CGRect r = c ? [c convertRect:c.bounds toView:nil] : CGRectZero;
+                if (c) dsh_dot(CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)));
+                [t selectRowAtIndexPath:want animated:NO scrollPosition:UITableViewScrollPositionNone];
+                id<UITableViewDelegate> del = t.delegate;
+                if ([del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                    [del tableView:t didSelectRowAtIndexPath:want];
                 }
+                out = [NSString stringWithFormat:@"row:%@", c ? dsh_cell_text(c) : @"(offscreen)"];
+                return;
             } else {
-                UICollectionView *t = tv;
+                UICollectionView *t = (UICollectionView *)tv;
                 NSIndexPath *wantI = [NSIndexPath indexPathForItem:row inSection:sec];
-                if (row < (long)[t numberOfItemsInSection:sec]) {
-                    [t selectItemAtIndexPath:wantI animated:NO scrollPosition:UICollectionViewScrollPositionNone];
-                    id<UICollectionViewDelegate> del = t.delegate;
-                    if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-                        [del collectionView:t didSelectItemAtIndexPath:wantI];
-                    }
-                    UICollectionViewCell *c = [t cellForItemAtIndexPath:wantI];
-                    out = [NSString stringWithFormat:@"item:%@", c ? dsh_cell_text(c) : @"?"];
-                    return;
+                if (sec >= (long)[t numberOfSections]) continue;
+                if (row >= (long)[t numberOfItemsInSection:sec]) continue;
+                UICollectionViewCell *c = [t cellForItemAtIndexPath:wantI];
+                [t selectItemAtIndexPath:wantI animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+                id<UICollectionViewDelegate> del = t.delegate;
+                if ([del respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                    [del collectionView:t didSelectItemAtIndexPath:wantI];
                 }
+                out = [NSString stringWithFormat:@"item:%@", c ? dsh_cell_text(c) : @"(offscreen)"];
+                return;
             }
         }
-    };
-    if ([NSThread isMainThread]) work();
-    else dispatch_sync(dispatch_get_main_queue(), work);
+    });
     return out;
 }
 
-/* 取字符串参数（支持 %XX 解码） */
-static const char *qstr(const char *req, const char *name) {
-    static char buf[768];
-    char pat[32]; snprintf(pat, sizeof(pat), "%s=", name);
-    const char *p = strstr(req, pat);
-    if (!p) { buf[0] = 0; return buf; }
-    p += strlen(pat);
-    size_t i = 0;
-    while (*p && *p != '&' && *p != ' ' && i + 1 < sizeof(buf)) {
-        if (*p == '%' && p[1] && p[2]) {
-            char h[3] = { p[1], p[2], 0 };
-            buf[i++] = (char)strtol(h, NULL, 16);
-            p += 3;
-        } else {
-            buf[i++] = *p++;
+#pragma mark - 滚动
+
+static UIScrollView *dsh_top_scroll(void) {
+    UIScrollView *best = nil;
+    NSMutableArray *stack = [NSMutableArray array];
+    for (UIWindow *w in dsh_all_windows()) [stack addObject:w];
+    int g = 0;
+    while (stack.count && g++ < 5000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if (v.hidden || v.alpha < 0.02) continue;
+        if ([v isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *sv = (UIScrollView *)v;
+            if (sv.contentSize.height > sv.bounds.size.height + 4) best = sv;
         }
+        [stack addObjectsFromArray:v.subviews];
     }
-    buf[i] = 0;
-    return buf;
+    return best;
 }
 
-/* 当前可编辑的输入框（优先 firstResponder） */
+static NSString *dsh_scroll(double dy) {
+    __block NSString *out = @"no-scrollview";
+    onMain(^{
+        UIScrollView *sv = dsh_top_scroll();
+        if (!sv) return;
+        CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
+        if (maxY < 0) maxY = 0;
+        CGFloat y = sv.contentOffset.y + dy;
+        if (y < 0) y = 0;
+        if (y > maxY) y = maxY;
+        [sv setContentOffset:CGPointMake(sv.contentOffset.x, y) animated:NO];
+        out = [NSString stringWithFormat:@"scroll:%.0f/%.0f", y, maxY];
+        lg(@"scroll -> %@", out);
+    });
+    return out;
+}
+
+/* 在可见行里找文本，找到就滚到中间并返回 indexPath；找不到返回 not-visible */
+static NSString *dsh_locate(NSString *needle) {
+    for (id tv in dsh_all_tables()) {
+        if ([tv isKindOfClass:[UITableView class]]) {
+            UITableView *t = (UITableView *)tv;
+            for (UITableViewCell *c in t.visibleCells) {
+                NSString *txt = dsh_cell_text(c);
+                if ([txt rangeOfString:needle].location != NSNotFound) {
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    if (ip) {
+                        [t scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+                        return [NSString stringWithFormat:@"%ld:%ld|%@", (long)ip.section, (long)ip.row, txt];
+                    }
+                }
+            }
+        } else {
+            UICollectionView *t = (UICollectionView *)tv;
+            for (UICollectionViewCell *c in t.visibleCells) {
+                NSString *txt = dsh_cell_text(c);
+                if ([txt rangeOfString:needle].location != NSNotFound) {
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    if (ip) {
+                        return [NSString stringWithFormat:@"%ld:%ld|%@", (long)ip.section, (long)ip.item, txt];
+                    }
+                }
+            }
+        }
+    }
+    return @"not-visible";
+}
+
+/* 一步步滚，最多 maxStep 次，找到就停 */
+static NSString *dsh_scroll_to(NSString *needle, double step, int maxStep) {
+    __block NSString *out = @"not-found";
+    NSString *hit = dsh_locate(needle);
+    if (![hit isEqualToString:@"not-visible"]) return hit;
+
+    for (int i = 0; i < maxStep; i++) {
+        __block BOOL moved = NO;
+        onMain(^{
+            UIScrollView *sv = dsh_top_scroll();
+            if (!sv) return;
+            CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
+            if (maxY <= 0) return;
+            CGFloat y = sv.contentOffset.y + step;
+            if (y < 0) y = 0;
+            if (y > maxY) y = maxY;
+            if (fabs(y - sv.contentOffset.y) < 1) return;
+            [sv setContentOffset:CGPointMake(sv.contentOffset.x, y) animated:NO];
+            moved = YES;
+        });
+        if (!moved) break;
+        usleep(180 * 1000);
+        hit = dsh_locate(needle);
+        if (![hit isEqualToString:@"not-visible"]) {
+            out = [NSString stringWithFormat:@"%@ (step %d)", hit, i + 1];
+            break;
+        }
+    }
+    return out;
+}
+
+#pragma mark - 文本输入
+
 static UIView *dsh_find_input(void) {
     UIView *any = nil;
     NSMutableArray *stack = [NSMutableArray array];
-    for (UIWindow *w in [UIApplication sharedApplication].windows) [stack addObject:w];
+    for (UIWindow *w in dsh_all_windows()) [stack addObject:w];
     int g = 0;
     while (stack.count && g++ < 4000) {
         UIView *v = stack.lastObject;
@@ -413,10 +460,9 @@ static UIView *dsh_find_input(void) {
     return any;
 }
 
-/* 直接往输入框写文字：设 text + 发变更通知，不碰键盘、不走 HID */
 static NSString *dsh_type(NSString *text) {
     __block NSString *out = @"no-input";
-    void (^work)(void) = ^{
+    onMain(^{
         UIView *in = dsh_find_input();
         if (!in) return;
         [in becomeFirstResponder];
@@ -430,20 +476,19 @@ static NSString *dsh_type(NSString *text) {
             tf.text = text;
             [tf sendActionsForControlEvents:UIControlEventEditingChanged];
         }
+        CGRect r = [in convertRect:in.bounds toView:nil];
+        dsh_dot(CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)));
         out = [NSString stringWithFormat:@"typed:%@:%@", NSStringFromClass([in class]), text];
         lg(@"type -> %@", out);
-    };
-    if ([NSThread isMainThread]) work();
-    else dispatch_sync(dispatch_get_main_queue(), work);
+    });
     return out;
 }
 
-/* 按标题触发 UIButton（发送 / 粘贴 / 切换到文字键盘等） */
 static NSString *dsh_press(NSString *title) {
     __block NSString *out = @"no-button";
-    void (^work)(void) = ^{
+    onMain(^{
         NSMutableArray *stack = [NSMutableArray array];
-        for (UIWindow *w in [UIApplication sharedApplication].windows) [stack addObject:w];
+        for (UIWindow *w in dsh_all_windows()) [stack addObject:w];
         int g = 0;
         while (stack.count && g++ < 6000) {
             UIView *v = stack.lastObject;
@@ -451,9 +496,10 @@ static NSString *dsh_press(NSString *title) {
             if (v.hidden || v.alpha < 0.02) continue;
             if ([v isKindOfClass:[UIButton class]]) {
                 UIButton *b = (UIButton *)v;
-                NSString *t = [b titleForState:UIControlStateNormal];
-                if (!t.length) t = b.currentTitle;
+                NSString *t = [b titleForState:UIControlStateNormal] ?: b.currentTitle;
                 if (t.length && [t isEqualToString:title]) {
+                    CGRect r = [b convertRect:b.bounds toView:nil];
+                    dsh_dot(CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)));
                     [b sendActionsForControlEvents:UIControlEventTouchUpInside];
                     out = [NSString stringWithFormat:@"pressed:%@:%@", t, NSStringFromClass([b class])];
                     lg(@"press -> %@", out);
@@ -462,10 +508,99 @@ static NSString *dsh_press(NSString *title) {
             }
             [stack addObjectsFromArray:v.subviews];
         }
-    };
-    if ([NSThread isMainThread]) work();
-    else dispatch_sync(dispatch_get_main_queue(), work);
+    });
     return out;
+}
+
+#pragma mark - 查询
+
+static NSString *dsh_list(void) {
+    __block NSString *out = @"(empty)";
+    onMain(^{
+        NSMutableString *s = [NSMutableString string];
+        for (id tv in dsh_all_tables()) {
+            if ([tv isKindOfClass:[UITableView class]]) {
+                UITableView *t = (UITableView *)tv;
+                for (UITableViewCell *c in t.visibleCells) {
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    if (!ip) continue;
+                    [s appendFormat:@"%ld-%ld | %@\n", (long)ip.section, (long)ip.row, dsh_cell_text(c)];
+                }
+            } else {
+                UICollectionView *t = (UICollectionView *)tv;
+                for (UICollectionViewCell *c in t.visibleCells) {
+                    NSIndexPath *ip = [t indexPathForCell:c];
+                    if (!ip) continue;
+                    [s appendFormat:@"%ld-%ld | %@\n", (long)ip.section, (long)ip.item, dsh_cell_text(c)];
+                }
+            }
+        }
+        out = s.length ? s : @"(empty)";
+    });
+    return out;
+}
+
+static void dsh_dump(UIView *v, int depth, NSMutableString *out, BOOL all) {
+    if (!v || v.hidden || v.alpha < 0.02) return;
+    if (v.frame.size.width <= 0.5 || v.frame.size.height <= 0.5) return;
+    CGRect r = [v convertRect:v.bounds toView:nil];
+    NSString *txt = dsh_view_text(v);
+    BOOL ia = [v isKindOfClass:[UIControl class]] || v.gestureRecognizers.count > 0;
+    if (all || txt.length || ia) {
+        [out appendFormat:@"%d|%s|%.0f,%.0f,%.0f,%.0f|%d|%@\n",
+            depth, NSStringFromClass([v class]).UTF8String,
+            r.origin.x, r.origin.y, r.size.width, r.size.height,
+            ia ? 1 : 0,
+            txt ? [txt stringByReplacingOccurrencesOfString:@"\n" withString:@" "] : @""];
+    }
+    if (depth >= 60) return;
+    for (UIView *s in v.subviews) dsh_dump(s, depth + 1, out, all);
+}
+
+#pragma mark - query 解析
+
+static void dsh_url_decode(const char *src, char *dst, size_t n) {
+    size_t i = 0;
+    while (*src && i + 1 < n) {
+        if (*src == '%' && src[1] && src[2]) {
+            char h[3] = { src[1], src[2], 0 };
+            dst[i++] = (char)strtol(h, NULL, 16);
+            src += 3;
+        } else if (*src == '+') { dst[i++] = ' '; src++; }
+        else { dst[i++] = *src++; }
+    }
+    dst[i] = 0;
+}
+
+static double qnum(const char *req, const char *name, double def) {
+    char pat[32]; snprintf(pat, sizeof(pat), "%s=", name);
+    const char *p = strstr(req, pat);
+    return p ? atof(p + strlen(pat)) : def;
+}
+
+static const char *qstr(const char *req, const char *name) {
+    static char buf[1024];
+    char pat[32]; snprintf(pat, sizeof(pat), "%s=", name);
+    const char *p = strstr(req, pat);
+    if (!p) { buf[0] = 0; return buf; }
+    p += strlen(pat);
+    char raw[1024]; size_t i = 0;
+    while (*p && *p != '&' && *p != ' ' && i + 1 < sizeof(raw)) raw[i++] = *p++;
+    raw[i] = 0;
+    dsh_url_decode(raw, buf, sizeof(buf));
+    return buf;
+}
+
+#pragma mark - HTTP
+
+static void reply(int fd, int code, const char *reason, const char *ctype, const char *body) {
+    size_t n = body ? strlen(body) : 0;
+    char hdr[256];
+    int hl = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        code, reason, ctype, n);
+    send(fd, hdr, hl, 0);
+    if (body && n) send(fd, body, n, 0);
 }
 
 static void handle(int fd) {
@@ -475,32 +610,48 @@ static void handle(int fd) {
     buf[n] = 0;
     if (!strstr(buf, kKey)) { reply(fd, 403, "Forbidden", "text/plain", "no key"); close(fd); return; }
 
-    char out[2048] = {0};
-    if (strstr(buf, "GET /list")) {
-        NSString *r = dsh_list();
-        snprintf(out, sizeof(out), "%s", [r UTF8String]);
+    NSString *res = @"bad";
+    if (strstr(buf, "GET /info")) {
+        res = [NSString stringWithFormat:@"pid=%d windows=%lu", getpid(),
+               (unsigned long)dsh_all_windows().count];
+    } else if (strstr(buf, "GET /list")) {
+        res = dsh_list();
+    } else if (strstr(buf, "GET /tree")) {
+        __block NSString *o = @"";
+        BOOL all = qnum(buf, "all", 0) != 0;
+        onMain(^{
+            NSMutableString *s = [NSMutableString string];
+            UIWindow *w = dsh_window();
+            [s appendFormat:@"# window=%s %.0fx%.0f\n",
+                w ? NSStringFromClass([w class]).UTF8String : "nil",
+                w ? w.bounds.size.width : 0, w ? w.bounds.size.height : 0];
+            if (w) dsh_dump(w, 0, s, all);
+            o = s;
+        });
+        res = o;
+    } else if (strstr(buf, "GET /scrollTo")) {
+        double dy = qnum(buf, "dy", 600);
+        res = dsh_scroll_to([NSString stringWithUTF8String:qstr(buf, "text")], dy > 0 ? -dy : dy, 12);
+    } else if (strstr(buf, "GET /scroll")) {
+        res = dsh_scroll(qnum(buf, "dy", 600));
     } else if (strstr(buf, "GET /tap_row")) {
         long s = (long)qnum(buf, "s", 0), r = (long)qnum(buf, "r", 0);
-        NSString *res = dsh_tap_row(s, r);
-        snprintf(out, sizeof(out), "%s", [res UTF8String]);
+        res = dsh_tap_row(s, r);
     } else if (strstr(buf, "GET /type")) {
-        NSString *r = dsh_type([NSString stringWithUTF8String:qstr(buf, "text")]);
-        snprintf(out, sizeof(out), "%s", [r UTF8String]);
+        res = dsh_type([NSString stringWithUTF8String:qstr(buf, "text")]);
     } else if (strstr(buf, "GET /press")) {
-        NSString *r = dsh_press([NSString stringWithUTF8String:qstr(buf, "title")]);
-        snprintf(out, sizeof(out), "%s", [r UTF8String]);
+        res = dsh_press([NSString stringWithUTF8String:qstr(buf, "title")]);
     } else if (strstr(buf, "GET /tap")) {
-        NSString *r = dsh_tap(qnum(buf, "x", 0.5), qnum(buf, "y", 0.5));
-        snprintf(out, sizeof(out), "%s", [r UTF8String]);
-    } else if (strstr(buf, "GET /info")) {
-        snprintf(out, sizeof(out), "pid=%d windows=%lu", getpid(),
-                 (unsigned long)[UIApplication sharedApplication].windows.count);
+        res = dsh_tap(qnum(buf, "x", 0.5), qnum(buf, "y", 0.5));
     } else {
         reply(fd, 400, "Bad Request", "text/plain", "bad");
         close(fd);
         return;
     }
-    reply(fd, 200, "OK", "text/plain", out);
+
+    char out[4096];
+    snprintf(out, sizeof(out), "%s", [res UTF8String]);
+    reply(fd, 200, "OK", "text/plain; charset=utf-8", out);
     lg(@"http -> %s", out);
     close(fd);
 }
