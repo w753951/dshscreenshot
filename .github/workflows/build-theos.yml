@@ -5,34 +5,23 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Install deps (老 libtinfo5)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wget unzip xz-utils curl libtinfo6 libncurses6
-          # Ubuntu 24.04 没有 libtinfo.so.5，做兼容软链
-          sudo mkdir -p /usr/lib/x86_64-linux-gnu
-          for lib in libtinfo libncurses libncursesw; do
-            for base in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
-              [ -f "$base/$lib.so.6" ] && sudo ln -sf "$base/$lib.so.6" "$base/$lib.so.5"
-            done
-          done
-          sudo ldconfig || true
+          sudo apt-get install -y -qq wget unzip xz-utils curl libtinfo5 libncurses5 || true
+          ls -la /lib/x86_64-linux-gnu/libtinfo.so.5* 2>/dev/null || echo "no libtinfo5"
 
       - name: Fetch arm64e toolchain
         run: |
           set -e
-          URL=https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
-          curl -L -o tc.tar.lzma "$URL"
-          ls -la tc.tar.lzma
-          mkdir -p $HOME/tc
-          tar xf tc.tar.lzma -C $HOME/tc
-          echo "--- tree ---"
+          curl -L -o tc.tar.lzma https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          mkdir -p $HOME/tc && tar xf tc.tar.lzma -C $HOME/tc
           ls $HOME/tc
-          find $HOME/tc -maxdepth 3 -name 'clang*' -o -maxdepth 3 -name 'ld64*' | head -10
+          $HOME/tc/ios-arm64e-clang-toolchain/bin/clang --version 2>&1 | head -3
 
       - name: Fetch SDK
         run: |
@@ -41,23 +30,16 @@ jobs:
 
       - name: Compile arm64e
         run: |
-          TC=$(ls -d $HOME/tc/*/ 2>/dev/null | head -1)
-          [ -z "$TC" ] && TC=$HOME/tc
-          echo "TC=$TC"
-          ls $TC
-          BIN=$TC/bin
+          TC=$HOME/tc/ios-arm64e-clang-toolchain
+          CLANG=$TC/bin/clang
           SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
           [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
           echo "SDK=$SDK"
           mkdir -p out
-          CLANG=$BIN/clang
-          $CLANG --version 2>&1 | head -3 || echo "clang missing"
           for ARCH in arm64 arm64e; do
             echo "=== $ARCH ==="
-            $CLANG -target ${ARCH}-apple-ios15.0 \
-              -isysroot "$SDK" \
-              -dynamiclib -O2 -fblocks -DNDEBUG \
-              -framework Foundation \
+            $CLANG -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
+              -dynamiclib -O2 -fblocks -DNDEBUG -framework Foundation \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshMin.dylib \
               -o out/DshMin.$ARCH.dylib src/probe/probe.m && echo "$ARCH OK" || echo "$ARCH FAILED"
           done
