@@ -168,9 +168,12 @@ static void set_mode(int m) {
 
 static int do_tap(double x, double y, int ms) {
     uint32_t id = 0x1001;
-    send_touch(0, x, y, id);
+    gHand = NULL;                       /* 每个手势重建 hand，避免子事件累积污染 */
+    send_touch(0, x, y, id);            /* down */
+    msleep(20);
+    send_touch(1, x, y, id);            /* move（同点，让 App 认为这是真实触摸） */
     msleep(ms);
-    send_touch(2, x, y, id);
+    send_touch(2, x, y, id);            /* up */
     return 0;
 }
 
