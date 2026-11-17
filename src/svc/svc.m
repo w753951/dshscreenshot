@@ -8,8 +8,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
-extern void *dispatch_get_main_queue(void);
-extern void dispatch_sync(void *q, void *block);
+
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -186,8 +185,13 @@ static unsigned char *capture_png(size_t *outLen) {
         lg("[cap] class %s = %p", cls_names[i], c);
     }
 
+    void *sysLib = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
+    void *(*pGetMainQ)(void) = sysLib ? dlsym(sysLib, "dispatch_get_main_queue") : NULL;
+    void (*pDispatchSync)(void*, void*) = sysLib ? dlsym(sysLib, "dispatch_sync") : NULL;
+    lg("[cap] getMainQ=%p dispatchSync=%p", (void*)pGetMainQ, (void*)pDispatchSync);
+
     __block int triggered = 0;
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    if (pGetMainQ && pDispatchSync) pDispatchSync(pGetMainQ(), ^{
         // 方法存在性检查，避免发送未知 selector 导致崩溃
         void *(*o_classGetClassMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getClassMethod") : NULL;
         void *(*o_classGetInstMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getInstanceMethod") : NULL;
