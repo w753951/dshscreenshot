@@ -334,13 +334,8 @@ static void show_dot_impl(double nx, double ny) {
     }
 
     if (!gDotView) {
-        void *v = SEND(gGetClass("UIView"), "alloc");
         DshRect local = { 0, 0, R * 2.0, R * 2.0 };
-        v = SEND1R(v, "initWithFrame:", local);
-        void *red = SEND(gGetClass("UIColor"), "redColor");
-        SEND1(v, "setBackgroundColor:", red);
-        void *layer = SEND(v, "layer");
-        if (layer) { SEND1D(layer, "setCornerRadius:", R); SEND1D(layer, "setBorderWidth:", 2.5); }
+        void *v = NULL;
 
         /* 让圆点能被手指拖动：动态造一个带 pan 手势的类 */
         void *(*allocClassPair)(void *, const char *, size_t) = dlsym(RTLD_DEFAULT, "objc_allocateClassPair");
@@ -351,21 +346,26 @@ static void show_dot_impl(double nx, double ny) {
             if (cls) {
                 addMethod(cls, gSel("dshPan:"), (void *)dsh_pan, "v@:@");
                 regPair(cls);
-                void *dv = SEND(cls, "alloc");
-                dv = SEND1R(dv, "initWithFrame:", local);
-                if (dv) v = dv;
+                v = SEND(cls, "alloc");
+                v = SEND1R(v, "initWithFrame:", local);
                 lg("[dot] draggable class installed");
             }
         }
+        if (!v) { v = SEND(gGetClass("UIView"), "alloc"); v = SEND1R(v, "initWithFrame:", local); }
 
-        SEND1(gDotWin, "addSubview:", v);
-        gDotView = v;
+        void *red = SEND(gGetClass("UIColor"), "redColor");
+        SEND1(v, "setBackgroundColor:", red);
+        void *layer = SEND(v, "layer");
+        if (layer) { SEND1D(layer, "setCornerRadius:", R); SEND1D(layer, "setBorderWidth:", 2.5); }
 
         void *pan = SEND(gGetClass("UIPanGestureRecognizer"), "alloc");
         pan = ((void *(*)(void *, void *, void *, void *))gMsg)(pan, gSel("initWithTarget:action:"), v, gSel("dshPan:"));
         if (pan) SEND1(v, "addGestureRecognizer:", pan);
-        SEND1(gDotWin, "setUserInteractionEnabled:", (void *)1);
         SEND1(v, "setUserInteractionEnabled:", (void *)1);
+
+        SEND1(gDotWin, "addSubview:", v);
+        gDotView = v;
+        SEND1(gDotWin, "setUserInteractionEnabled:", (void *)1);
     }
     SEND1(gDotWin, "setHidden:", NULL);
     lg("[dot] shown at %.3f,%.3f", nx, ny);
