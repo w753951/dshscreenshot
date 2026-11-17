@@ -1,0 +1,69 @@
+name: Build with Theos toolchain
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip git libncurses-dev libssl-dev
+
+      - name: Fetch Theos toolchain (prebuilt Linux)
+        run: |
+          set -e
+          mkdir -p $HOME/toolchain
+          URL=https://github.com/theos/toolchain/releases/latest/download/linux-x86_64.zip
+          echo "URL=$URL"
+          wget -q "$URL" -O tc.zip && echo "download ok" || echo "download FAILED"
+          ls -la tc.zip
+          unzip -q -o tc.zip -d $HOME/toolchain
+          echo "--- toolchain tree ---"
+          find $HOME/toolchain -maxdepth 3 -type f \( -name 'ld64' -o -name 'clang*' -o -name 'ldid' \) | head -20
+          echo "--- all bin ---"
+          ls $HOME/toolchain/toolchain/linux/iphone/bin/ 2>/dev/null | head -30 || find $HOME/toolchain -maxdepth 4 -type d -name bin | head
+
+      - name: Fetch SDK
+        run: |
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+
+      - name: Compile real arm64e
+        run: |
+          TC=$HOME/toolchain/toolchain/linux/iphone
+          BIN=$TC/bin
+          echo "--- BIN=$BIN ---"
+          ls $BIN 2>/dev/null | head -30
+          SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
+          mkdir -p out
+          CLANG=$BIN/clang
+          [ -x "$CLANG" ] || CLANG=$(ls $BIN/*clang* 2>/dev/null | head -1)
+          echo "CLANG=$CLANG"
+          $CLANG --version 2>&1 | head -2 || true
+          for ARCH in arm64 arm64e; do
+            X=""
+            [ "$ARCH" = "arm64e" ] && X="-fptrauth-calls -fptrauth-returns -fptrauth-indirect-gotos -fptrauth-auth-traps"
+            $CLANG -target ${ARCH}-apple-ios15.0 \
+              -isysroot "$SDK" \
+              -B "$BIN" \
+              -dynamiclib -O2 -fblocks $X -DNDEBUG \
+              -framework Foundation \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshMin.dylib \
+              -o out/DshMin.$ARCH.dylib src/probe/probe.m && echo "$ARCH OK" || echo "$ARCH FAILED"
+          done
+          ls -la out/
+          for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-theos
+          path: out/
+          retention-days: 7
+          if-no-files-found: warn
