@@ -556,7 +556,9 @@ static NSString *dsh_type(NSString *text) {
         [in becomeFirstResponder];
         if ([in isKindOfClass:[UITextView class]]) {
             UITextView *tv = (UITextView *)in;
-            [tv insertText:text];   /* 走真实输入路径：触发 inputDelegate → 微信发送键会出现 */
+            [tv insertText:text];
+            if ([tv.delegate respondsToSelector:@selector(textViewDidChange:)]) [tv.delegate textViewDidChange:tv];
+            [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification object:tv];
         } else {
             UITextField *tf = (UITextField *)in;
             tf.text = text;
@@ -739,10 +741,10 @@ static void handle(int fd) {
         return;
     }
 
-    char out[4096];
-    snprintf(out, sizeof(out), "%s", [res UTF8String]);
-    reply(fd, 200, "OK", "text/plain; charset=utf-8", out);
-    lg(@"http -> %s", out);
+    const char *utf = [res UTF8String];
+    if (!utf) utf = "";
+    reply(fd, 200, "OK", "text/plain; charset=utf-8", utf);
+    lg(@"http -> %.300s", utf);
     close(fd);
 }
 
