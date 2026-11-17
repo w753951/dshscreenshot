@@ -1,4 +1,4 @@
-name: Build svc
+name: Build svc (real arm64e)
 
 on:
   workflow_dispatch:
@@ -7,35 +7,38 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM 19
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip xz-utils curl libtinfo5 libncurses5 || true
+      - name: toolchain
         run: |
           set -e
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq wget unzip
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/llvm.asc >/dev/null
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | sudo tee /etc/apt/sources.list.d/llvm19.list >/dev/null
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq clang-19 lld-19 llvm-19
-      - name: Fetch SDK
+          curl -L -o tc.tar.lzma https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          mkdir -p $HOME/tc && tar xf tc.tar.lzma -C $HOME/tc
+          $HOME/tc/ios-arm64e-clang-toolchain/bin/clang --version | head -2
+      - name: sdk
         run: |
           wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
           unzip -q sdks.zip
-      - name: Compile arm64 (chained fixups)
+      - name: compile
         run: |
           set -e
-          SDK="$PWD/sdks-master/iPhoneOS15.6.sdk"
-          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | tail -1)
+          C=$HOME/tc/ios-arm64e-clang-toolchain/bin/clang
+          SDK=$PWD/sdks-master/iPhoneOS13.7.sdk
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | sort -V | head -1)
           mkdir -p out
-          /usr/lib/llvm-19/bin/clang -target arm64-apple-ios15.0 -isysroot "$SDK" \
-            -fuse-ld=/usr/lib/llvm-19/bin/ld64.lld -dynamiclib -O2 -DNDEBUG \
-            -Wl,-fixup_chains -Wl,-platform_version,ios,15.0,15.6 -Wl,-arch,arm64 \
-            -install_name /Library/MobileSubstrate/DynamicLibraries/DshSvc.dylib \
-            -o out/DshSvc.arm64.dylib src/svc/svc.m
+          for ARCH in arm64e arm64; do
+            $C -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
+              -dynamiclib -O2 -DNDEBUG \
+              -install_name /Library/MobileSubstrate/DynamicLibraries/DshSvc.dylib \
+              -o out/DshSvc.$ARCH.dylib src/svc/svc.m && echo "$ARCH OK" || echo "$ARCH FAILED"
+          done
           ls -la out/
-          od -An -tx4 -N 12 out/DshSvc.arm64.dylib
+          for f in out/*.dylib; do echo "$f:"; od -An -tx4 -N 12 $f; done
       - uses: actions/upload-artifact@v4
         with:
           name: svc
