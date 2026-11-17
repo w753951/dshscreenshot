@@ -576,18 +576,18 @@ static NSString *dsh_press(NSString *title) {
         NSMutableArray *stack = [NSMutableArray array];
         for (UIWindow *w in dsh_all_windows()) [stack addObject:w];
         int g = 0;
-        while (stack.count && g++ < 6000) {
+        while (stack.count && g++ < 8000) {
             UIView *v = stack.lastObject;
             [stack removeLastObject];
-            if (v.hidden || v.alpha < 0.02) continue;
-            if ([v isKindOfClass:[UIButton class]]) {
-                UIButton *b = (UIButton *)v;
-                NSString *t = [b titleForState:UIControlStateNormal] ?: b.currentTitle;
-                if (t.length && [t isEqualToString:title]) {
-                    CGRect r = [b convertRect:b.bounds toView:nil];
+            if (v.alpha < 0.01) continue;   /* 不按 hidden 过滤：微信发送键常以 hidden=YES 待命 */
+            if ([v isKindOfClass:[UIControl class]]) {
+                NSString *t = dsh_view_text(v);
+                if (t.length && ([t isEqualToString:title] || [t rangeOfString:title].location != NSNotFound)) {
+                    CGRect r = [v convertRect:v.bounds toView:nil];
                     dsh_dot(CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)));
-                    [b sendActionsForControlEvents:UIControlEventTouchUpInside];
-                    out = [NSString stringWithFormat:@"pressed:%@:%@", t, NSStringFromClass([b class])];
+                    [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+                    out = [NSString stringWithFormat:@"pressed:%@:%@ hidden=%d",
+                           t, NSStringFromClass([v class]), (int)v.hidden];
                     lg(@"press -> %@", out);
                     return;
                 }
