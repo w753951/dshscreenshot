@@ -171,33 +171,44 @@ static unsigned char *capture_png(size_t *outLen) {
     void *base0 = f_surfaceBase(surf);
     lg("[cap] surf w=%zu h=%zu bpr=%zu base=%p", bw0, bh0, bpr0, base0);
 
-    if (f_dispCount) {
-        int cnt = f_dispCount();
-        lg("[cap] display count=%d", cnt);
-        for (int i = 0; i < cnt && i < 6; i++) {
-            CFStringRef nm = f_dispName ? f_dispName(i) : NULL;
-            char nb[128] = {0};
-            if (nm && f_strGetCString) f_strGetCString(nm, nb, sizeof(nb)-1, 0x08000100);
-            lg("[cap] display[%d] name='%s'", i, nb);
+    // 方案 B：IOMobileFramebuffer 直接拿主屏 surface
+    void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+    void *imf   = dlopen("/System/Library/Frameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
+    lg("[cap] iokit=%p imf=%p", iokit, imf);
+
+    unsigned (*fb_open)(void) = iokit ? dlsym(iokit, "IOMobileFramebufferOpen") : NULL;
+    int (*fb_getMain)(unsigned*) = imf ? dlsym(imf, "IOMobileFramebufferGetMainDisplay") : NULL;
+    int (*fb_getLayer)(unsigned, int, IOSurfaceRef*) = imf ? dlsym(imf, "IOMobileFramebufferGetLayerDefaultSurface") : NULL;
+    lg("[cap] fb_open=%p getMain=%p getLayer=%p", (void*)fb_open, (void*)fb_getMain, (void*)fb_getLayer);
+
+    IOSurfaceRef fbSurf = NULL;
+    if (fb_open && fb_getLayer) {
+        unsigned fb = fb_open();
+        lg("[cap] fb handle=%u", fb);
+        if (fb) {
+            int r = fb_getLayer(fb, 0, &fbSurf);
+            lg("[cap] getLayer rc=%d surf=%p", r, (void*)fbSurf);
         }
-    } else lg("[cap] no dispCount symbol");
+    }
 
-    CFStringRef lcd = f_strCreate(NULL, "LCD", 0x08000100);
-    f_renderDisplay(1, lcd, surf);
-    usleep(80000);
+    if (!fbSurf) { lg("[cap] no fb surface"); f_cfRelease(surf); return NULL; }
 
-    // 检查 surface 是否有内容（byte 非零计数）
-    size_t nz = 0;
-    const unsigned char *pb = (const unsigned char *)base0;
-    size_t total = bpr0 * bh0;
-    if (pb) { for (size_t i = 0; i < total; i += 97) if (pb[i]) nz++; }
-    lg("[cap] after render: sampled-nonzero=%zu (total/sample=%zu)", nz, total/97);
-    if (nz == 0) { lg("[cap] BLANK surface"); f_cfRelease(surf); return NULL; }
+    size_t fbw = f_surfaceW ? f_surfaceW(fbSurf) : 0;
+    size_t fbh = f_surfaceH ? f_surfaceH(fbSurf) : 0;
+    size_t fbpr = f_surfaceBPR(fbSurf);
+    void *fbbase = f_surfaceBase(fbSurf);
+    lg("[cap] fb surface w=%zu h=%zu bpr=%zu base=%p", fbw, fbh, fbpr, fbbase);
+    if (!fbw || !fbh || !fbbase) { lg("[cap] bad fb surface"); f_cfRelease(surf); return NULL; }
 
-    size_t bw = f_surfaceW ? f_surfaceW(surf) : W;
-    size_t bh = f_surfaceH ? f_surfaceH(surf) : H;
-    size_t bpr = f_surfaceBPR(surf);
-    void *base = f_surfaceBase(surf);
+    // 采样确认非空
+    size_t nz2 = 0;
+    const unsigned char *pfb = (const unsigned char*)fbbase;
+    size_t tot2 = fbpr * fbh;
+    for (size_t i = 0; i < tot2; i += 97) if (pfb[i]) nz2++;
+    lg("[cap] fb sampled-nonzero=%zu", nz2);
+
+    size_t bw = fbw, bh = fbh, bpr = fbpr;
+    void *base = fbbase;
 
     CGColorSpaceRef cs = f_csDeviceRGB();
     CGContextRef ctx = f_bitmapCtxCreate(base, bw, bh, 8, bpr, cs,
