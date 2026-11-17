@@ -185,13 +185,17 @@ static unsigned char *capture_png(size_t *outLen) {
         lg("[cap] class %s = %p", cls_names[i], c);
     }
 
-    void *sysLib = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
-    void *(*pGetMainQ)(void) = sysLib ? dlsym(sysLib, "dispatch_get_main_queue") : NULL;
-    void (*pDispatchSync)(void*, void*) = sysLib ? dlsym(sysLib, "dispatch_sync") : NULL;
-    lg("[cap] getMainQ=%p dispatchSync=%p", (void*)pGetMainQ, (void*)pDispatchSync);
+    void *(*pGetMainQ)(void) = (void *(*)(void))dlsym(RTLD_DEFAULT, "dispatch_get_main_queue");
+    void (*pDispatchSync)(void*, void*) = (void (*)(void*, void*))dlsym(RTLD_DEFAULT, "dispatch_sync");
+    void *pMainQObj = (void *)dlsym(RTLD_DEFAULT, "_dispatch_main_q");
+    lg("[cap] getMainQ=%p dispatchSync=%p mainQObj=%p", (void*)pGetMainQ, (void*)pDispatchSync, pMainQObj);
+
+    void *mainQ = NULL;
+    if (pGetMainQ) mainQ = pGetMainQ();
+    if (!mainQ && pMainQObj) mainQ = pMainQObj;
 
     __block int triggered = 0;
-    if (pGetMainQ && pDispatchSync) pDispatchSync(pGetMainQ(), ^{
+    if (mainQ && pDispatchSync) pDispatchSync(mainQ, ^{
         // 方法存在性检查，避免发送未知 selector 导致崩溃
         void *(*o_classGetClassMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getClassMethod") : NULL;
         void *(*o_classGetInstMethod)(void*, void*) = libobjc ? dlsym(libobjc, "class_getInstanceMethod") : NULL;
