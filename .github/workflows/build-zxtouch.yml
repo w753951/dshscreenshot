@@ -10,7 +10,7 @@ jobs:
       - name: deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y git make curl wget unzip xz-utils dpkg libtinfo5 libncurses5 ldid
+          sudo apt-get install -y git make curl wget unzip xz-utils dpkg libtinfo5 libncurses5
 
       - name: toolchain
         run: |
@@ -47,7 +47,9 @@ jobs:
           mkdir -p "$THEOS/toolchain/linux"
           rm -rf "$THEOS/toolchain/linux/iphone"
           ln -sfn "$HOME/tc/ios-arm64e-clang-toolchain" "$THEOS/toolchain/linux/iphone"
-          ln -sfn "$(command -v ldid || echo /usr/bin/ldid)" "$THEOS/toolchain/linux/iphone/bin/ldid" 2>/dev/null || true
+          mkdir -p "$THEOS/bin"
+          printf "#!/bin/sh\nexit 0\n" > "$THEOS/bin/ldid"
+          chmod +x "$THEOS/bin/ldid"
           export PATH="$HOME/tc/ios-arm64e-clang-toolchain/bin:$PATH"
           export THEOS_PACKAGE_SCHEME=rootless
           cd src/pccontrol
