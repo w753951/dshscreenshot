@@ -1,0 +1,51 @@
+name: Build dshctl (arm64 CLI)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/ctl/**'
+      - '.github/workflows/build-ctl.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip xz-utils curl libtinfo5 libncurses5 ldid || true
+
+      - name: toolchain
+        run: |
+          set -e
+          curl -L -o tc.tar.lzma https://github.com/sbingner/llvm-project/releases/download/v10.0.0-1/linux-ios-arm64e-clang-toolchain.tar.lzma
+          mkdir -p $HOME/tc && tar xf tc.tar.lzma -C $HOME/tc
+          $HOME/tc/ios-arm64e-clang-toolchain/bin/clang --version | head -2
+
+      - name: sdk
+        run: |
+          wget -q https://github.com/theos/sdks/archive/master.zip -O sdks.zip
+          unzip -q sdks.zip
+
+      - name: compile
+        run: |
+          set -e
+          C=$HOME/tc/ios-arm64e-clang-toolchain/bin/clang
+          SDK=$PWD/sdks-master/iPhoneOS13.7.sdk
+          [ -d "$SDK" ] || SDK=$(ls -d $PWD/sdks-master/iPhoneOS*.sdk | sort -V | head -1)
+          mkdir -p out
+          $C -target arm64-apple-ios15.0 -isysroot "$SDK" -O2 -fblocks \
+             -framework CoreFoundation -framework IOKit \
+             -o out/dshctl src/ctl/ctl.m
+          file out/dshctl || true
+          od -An -tx4 -N 12 out/dshctl
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dshctl
+          path: out/dshctl
+          retention-days: 7

@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <dispatch/dispatch.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -34,9 +35,10 @@ struct CapCtx {
     void *uikit;
     void *(*create)(int);
     void *(*pngRep)(void *);
+    dispatch_semaphore_t sem;
 };
 
-static void capture_core(void *p) {
+static void cap_body(void *p) {
     struct CapCtx *c = (struct CapCtx *)p;
     c->out = NULL; c->len = 0;
 
@@ -95,6 +97,13 @@ static void capture_core(void *p) {
     c->len = (size_t)len;
 }
 
+/* 主队列执行体：保证一定会 signal，哪怕中间提前 return */
+static void capture_core(void *p) {
+    struct CapCtx *c = (struct CapCtx *)p;
+    cap_body(p);
+    if (c && c->sem) dispatch_semaphore_signal(c->sem);
+}
+
 static unsigned char *capture_png(size_t *outLen) {
     *outLen = 0;
 
@@ -107,26 +116,37 @@ static unsigned char *capture_png(size_t *outLen) {
     lg("[cap] create=%p pngRep=%p", (void*)create, (void*)pngRep);
     if (!create || !pngRep) return NULL;
 
-    struct CapCtx ctx;
-    ctx.out = NULL; ctx.len = 0; ctx.uikit = uikit;
-    ctx.create = create; ctx.pngRep = pngRep;
+    /* 堆上分配：超时后 worker 仍可能在使用，不能放栈 */
+    struct CapCtx *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) return NULL;
+    ctx->uikit = uikit;
+    ctx->create = create;
+    ctx->pngRep = pngRep;
+    ctx->sem = dispatch_semaphore_create(0);
 
-    /* 主队列 + dispatch_sync_f */
+    /* 主队列 + dispatch_async_f + 3s 超时：
+       主线程一旦卡住，服务线程不会跟着死锁，直接回 503 */
     void *mainQ = (void *)dlsym(RTLD_DEFAULT, "_dispatch_main_q");
-    void (*sync_f)(void*, void*, void (*)(void*)) =
-        (void (*)(void*, void*, void (*)(void*)))dlsym(RTLD_DEFAULT, "dispatch_sync_f");
-    lg("[cap] mainQ=%p sync_f=%p", mainQ, (void*)sync_f);
+    void (*async_f)(void *, void *, void (*)(void *)) =
+        (void (*)(void *, void *, void (*)(void *)))dlsym(RTLD_DEFAULT, "dispatch_async_f");
+    lg("[cap] mainQ=%p async_f=%p", mainQ, (void*)async_f);
 
-    if (mainQ && sync_f) {
-        sync_f(mainQ, &ctx, capture_core);
+    if (mainQ && async_f) {
+        async_f(mainQ, ctx, capture_core);
+        long r = dispatch_semaphore_wait(ctx->sem,
+                                         dispatch_time(DISPATCH_TIME_NOW, 3LL * NSEC_PER_SEC));
+        if (r != 0) {
+            lg("[cap] timeout, return 503");
+            return NULL;          /* ctx 交由 worker 收尾，故意不 free */
+        }
         lg("[cap] ran on main queue");
     } else {
-        capture_core(&ctx);
+        capture_core(ctx);
         lg("[cap] ran on caller thread");
     }
 
-    *outLen = ctx.len;
-    return ctx.out;
+    *outLen = ctx->len;
+    return ctx->out;
 }
 
 static void reply(int fd, int code, const char *reason, const char *ctype,
