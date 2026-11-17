@@ -369,7 +369,11 @@ static NSString *dsh_scroll(double dy) {
         if (y < 0) y = 0;
         if (y > maxY) y = maxY;
         [sv setContentOffset:CGPointMake(sv.contentOffset.x, y) animated:NO];
-        out = [NSString stringWithFormat:@"scroll:%.0f/%.0f", y, maxY];
+        /* 滑动可视化：在滚动区域中心画红点，向下滚偏上、向上滚偏下，一眼看出方向 */
+        CGRect vis = [sv convertRect:sv.bounds toView:nil];
+        CGPoint c = CGPointMake(CGRectGetMidX(vis), CGRectGetMidY(vis) + (dy > 0 ? -70 : 70));
+        dsh_dot(c);
+        out = [NSString stringWithFormat:@"scroll:%.0f/%.0f (dot %.0f,%.0f)", y, maxY, c.x, c.y];
         lg(@"scroll -> %@", out);
     });
     return out;
