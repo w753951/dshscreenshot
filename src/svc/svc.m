@@ -1,9 +1,8 @@
 // svc.m —— SpringBoard 截图服务（真 arm64e）
 // GET http://127.0.0.1:47191/capture?key=dsh-go-screen-v1 -> image/png
 //
-// 抓屏策略：用 IOHID 模拟「电源键 + 音量上」组合键，走系统自带截图流程，
-// 系统会把 PNG 存进 DCIM，我们再读回来。
-// 这条路与你手动按键截图完全一致，成功率最高。
+// 抓屏用 UIKit 私有 C 函数 __UICreateScreenUIImageWithRotation
+// （与越狱插件 Snapper3 完全相同的 API，已确认该符号存在于本机）
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +11,6 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
-#include <dirent.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -29,123 +27,48 @@ static void lg(const char *fmt, ...) {
     fputc('\n', f); fclose(f);
 }
 
-/* ---------- IOKit HID ---------- */
-static void *(*p_clientCreate)(const void*);
-static void  (*p_clientDispatch)(void*, void*);
-static int   (*p_clientSetProp)(void*, const void*, const void*);
-static void *(*p_kbdEvent)(const void*, unsigned long long, unsigned, unsigned, int, unsigned);
-static void *(*p_eventCreate)(unsigned, unsigned, int);
+/* 取屏幕 PNG（malloc，调用方 free） */
+static unsigned char *capture_png(size_t *outLen) {
+    *outLen = 0;
 
-/* 在 DCIM 里找最新 PNG 文件名（不含路径），失败返回 0 */
-static void newest_png(char *out, size_t cap) {
-    out[0] = 0;
-    const char *dirs[] = {
-        "/var/mobile/Media/DCIM/125APPLE",
-        "/var/mobile/Media/DCIM/124APPLE",
-        "/var/mobile/Media/DCIM/100APPLE",
-        NULL
-    };
-    for (int d = 0; dirs[d]; d++) {
-        DIR *dp = opendir(dirs[d]);
-        if (!dp) continue;
-        struct dirent *e;
-        while ((e = readdir(dp)) != NULL) {
-            size_t L = strlen(e->d_name);
-            if (L < 5) continue;
-            if (!(strstr(e->d_name, ".PNG") || strstr(e->d_name, ".png"))) continue;
-            if (out[0] == 0 || strcmp(e->d_name, out) > 0) {
-                snprintf(out, cap, "%s", e->d_name);
-            }
-        }
-        closedir(dp);
-    }
-}
+    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
+    lg("[cap] UIKit=%p", uikit);
+    if (!uikit) return NULL;
 
-/* 在 DCIM 里拼出完整路径 */
-static int find_path(const char *name, char *out, size_t cap) {
-    const char *dirs[] = {
-        "/var/mobile/Media/DCIM/125APPLE",
-        "/var/mobile/Media/DCIM/124APPLE",
-        "/var/mobile/Media/DCIM/100APPLE",
-        NULL
-    };
-    for (int d = 0; dirs[d]; d++) {
-        snprintf(out, cap, "%s/%s", dirs[d], name);
-        if (access(out, R_OK) == 0) return 1;
-    }
-    return 0;
-}
+    void *(*createScreen)(int)  = dlsym(uikit, "__UICreateScreenUIImageWithRotation");
+    void *(*createScreen2)(int) = dlsym(uikit, "_UICreateScreenUIImageWithRotation");
+    void *(*pngRep)(void *)     = dlsym(uikit, "UIImagePNGRepresentation");
+    lg("[cap] createScreen=%p alt=%p pngRep=%p",
+       (void*)createScreen, (void*)createScreen2, (void*)pngRep);
 
-static int load_hid(void) {
-    void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
-    lg("[hid] IOKit=%p", iokit);
-    if (!iokit) return 0;
+    void *img = NULL;
+    if (createScreen)       img = createScreen(1);
+    else if (createScreen2) img = createScreen2(1);
+    lg("[cap] image=%p", img);
+    if (!img) { lg("[cap] no image"); return NULL; }
+    if (!pngRep) { lg("[cap] no pngRep"); return NULL; }
 
-    p_clientCreate   = dlsym(iokit, "IOHIDEventSystemClientCreate");
-    p_clientDispatch = dlsym(iokit, "IOHIDEventSystemClientDispatchEvent");
-    p_clientSetProp  = dlsym(iokit, "IOHIDEventSystemClientSetProperty");
-    p_kbdEvent       = dlsym(iokit, "IOHIDEventCreateKeyboardEvent");
-    p_eventCreate    = dlsym(iokit, "IOHIDEventCreate");
+    void *data = pngRep(img);
+    lg("[cap] nsdata=%p", data);
+    if (!data) { lg("[cap] no data"); return NULL; }
 
-    lg("[hid] clientCreate=%p dispatch=%p kbdEvent=%p",
-       (void*)p_clientCreate, (void*)p_clientDispatch, (void*)p_kbdEvent);
-    return p_clientCreate && p_clientDispatch && p_kbdEvent;
-}
-
-/* 派发一个按键事件：page/usage, down=1按下
- * 用 IOHIDEventCreateKeyboardEvent，然后交给 HID system client 派发 */
-static void send_key(void *client, unsigned page, unsigned usage, int down) {
-    if (!p_kbdEvent || !client) return;
-    /* (allocator, timestamp, usagePage, usage, down, options) */
-    void *ev = p_kbdEvent(NULL, 0, page, usage, down ? 1 : 0, 0);
-    if (!ev) { lg("[hid] event null page=0x%x usage=0x%x", page, usage); return; }
-    p_clientDispatch(client, ev);
-}
-
-/* 模拟「电源 + 音量上」截图组合键 */
-static int trigger_screenshot(void) {
-    if (!p_clientCreate) { lg("[hid] not loaded"); return 0; }
-    void *client = p_clientCreate(NULL);
-    lg("[hid] client=%p", client);
-    if (!client) return 0;
-
-    /* AllowInstrumentation 让 client 能派发事件 */
     void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
-    void *(*boolOf)(int) = cf ? dlsym(cf, "CFBooleanGetValue") : NULL;
-    const void *kTrue = (cf ? dlsym(cf, "kCFBooleanTrue") : NULL);
-    (void)boolOf; (void)kTrue;
+    const void *(*getBytes)(void*) = cf ? dlsym(cf, "CFDataGetBytePtr") : NULL;
+    long (*getLen)(void*)          = cf ? dlsym(cf, "CFDataGetLength") : NULL;
+    if (!getBytes || !getLen) { lg("[cap] CFData syms missing"); return NULL; }
 
-    if (p_clientSetProp && cf) {
-        const void *kbn = (const void *)dlsym(cf, "kCFBooleanTrue");
-        if (kbn) {
-            CFStringRef (*mkstr)(const void*, const char*, unsigned) = dlsym(cf, "CFStringCreateWithCString");
-            if (mkstr) {
-                const void *key = mkstr(NULL, "AllowInstrumentation", 0x08000100);
-                p_clientSetProp(client, key, kbn);
-                lg("[hid] AllowInstrumentation set");
-            }
-        }
-    }
+    long len = getLen(data);
+    const void *b = getBytes(data);
+    lg("[cap] png len=%ld", len);
+    if (len <= 8 || !b) return NULL;
 
-    /* Consumer page = 0x0C；Power = 0x30；Volume Increment = 0xE9 */
-    const unsigned PAGE = 0x0C, POWER = 0x30, VOLUP = 0xE9;
-
-    lg("[hid] press power");
-    send_key(client, PAGE, POWER, 1);
-    usleep(20000);
-    lg("[hid] press volup");
-    send_key(client, PAGE, VOLUP, 1);
-    usleep(60000);
-    lg("[hid] release volup");
-    send_key(client, PAGE, VOLUP, 0);
-    usleep(20000);
-    lg("[hid] release power");
-    send_key(client, PAGE, POWER, 0);
-
-    return 1;
+    unsigned char *out = malloc((size_t)len);
+    if (!out) return NULL;
+    memcpy(out, b, (size_t)len);
+    *outLen = (size_t)len;
+    return out;
 }
 
-// ---- HTTP ----
 static void reply(int fd, int code, const char *reason, const char *ctype,
                   const void *body, size_t blen) {
     char hdr[320];
@@ -158,53 +81,6 @@ static void reply(int fd, int code, const char *reason, const char *ctype,
         const unsigned char *p = body; size_t left = blen;
         while (left) { ssize_t n = send(fd, p, left, 0); if (n <= 0) break; p += n; left -= (size_t)n; }
     }
-}
-
-static unsigned char *capture_png(size_t *outLen) {
-    *outLen = 0;
-
-    /* 方案 D：__UICreateScreenUIImageWithRotation（Snapper3 用的就是这个）
-     * UIKit 私有 C 函数：
-     *   UIImage *__UICreateScreenUIImageWithRotation(BOOL rotate)
-     *   NSData  *UIImagePNGRepresentation(UIImage *)
-     * NSData 与 CFData 是 toll-free bridged，可直接用 CFDataGetBytePtr 取字节 */
-    void *uikit = dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", RTLD_LAZY);
-    lg("[cap] UIKit=%p", uikit);
-    if (!uikit) { lg("[cap] no UIKit"); return NULL; }
-
-    void *(*createScreen)(int) = dlsym(uikit, "__UICreateScreenUIImageWithRotation");
-    void *(*createScreen2)(int) = dlsym(uikit, "_UICreateScreenUIImageWithRotation");
-    void *(*pngRep)(void *) = dlsym(uikit, "UIImagePNGRepresentation");
-    lg("[cap] createScreen=%p alt=%p pngRep=%p", (void*)createScreen, (void*)createScreen2, (void*)pngRep);
-
-    void *img = NULL;
-    if (createScreen) img = createScreen(1);
-    else if (createScreen2) img = createScreen2(1);
-    lg("[cap] image=%p", img);
-    if (!img || !pngRep) { lg("[cap] no image"); return NULL; }
-
-    void *data = pngRep(img);
-    lg("[cap] nsdata=%p", data);
-    if (!data) { lg("[cap] no data"); return NULL; }
-
-    /* CFData 兼容取字节 */
-    void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY);
-    const void *(*getBytes)(void*) = cf ? dlsym(cf, "CFDataGetBytePtr") : NULL;
-    long (*getLen)(void*) = cf ? dlsym(cf, "CFDataGetLength") : NULL;
-
-    unsigned char *out = NULL;
-    if (getBytes && getLen) {
-        long len = getLen(data);
-        const void *b = getBytes(data);
-        lg("[cap] png len=%ld bytes=%p", len, b);
-        if (len > 8 && b) {
-            out = malloc((size_t)len);
-            if (out) { memcpy(out, b, (size_t)len); *outLen = (size_t)len; }
-        }
-    } else {
-        lg("[cap] CFData syms missing");
-    }
-    return out;
 }
 
 static void handle(int fd) {
@@ -230,8 +106,6 @@ static void *server_thread(void *arg) {
     (void)arg;
     sleep(8);
     lg("[svc] start uid=%d pid=%d", getuid(), getpid());
-    int hidok = load_hid();
-    lg("[svc] hid ready=%d", hidok);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { lg("[svc] socket errno=%d", errno); return NULL; }
