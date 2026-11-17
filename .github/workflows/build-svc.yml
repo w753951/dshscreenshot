@@ -33,7 +33,7 @@ jobs:
           mkdir -p out
           for ARCH in arm64e arm64; do
             $C -target ${ARCH}-apple-ios15.0 -isysroot "$SDK" \
-              -dynamiclib -O2 -DNDEBUG \
+              -dynamiclib -O2 -fblocks -DNDEBUG \
               -install_name /Library/MobileSubstrate/DynamicLibraries/DshSvc.dylib \
               -o out/DshSvc.$ARCH.dylib src/svc/svc.m && echo "$ARCH OK" || echo "$ARCH FAILED"
           done
