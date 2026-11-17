@@ -15,7 +15,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq git make autoconf automake libtool \
             clang llvm-dev libssl-dev libxml2-dev pkg-config zlib1g-dev \
-            libncurses5-dev wget unzip build-essential
+            libncurses5-dev wget unzip build-essential libblocksruntime-dev libdispatch-dev libbsd-dev || true
 
       - name: Build cctools-port ld64
         run: |
@@ -24,8 +24,9 @@ jobs:
           cd cctools-port/cctools
           ./autogen.sh
           ./configure --prefix=/usr/local --target=x86_64-apple-darwin \
-            --with-llvm-config=$(command -v llvm-config) \
-            --enable-ld64 --disable-ld64-plugin --disable-lto
+            --with-llvm-config=$(command -v llvm-config-19 || command -v llvm-config) \
+            --enable-ld64 --disable-ld64-plugin --disable-lto \
+            --with-libblocksruntime=/usr/lib/x86_64-linux-gnu 2>&1 | tail -5
           make -j$(nproc) ld64-ld 2>&1 | tail -20 || make -j$(nproc) 2>&1 | tail -20
           ls -la ld64-ld* 2>/dev/null || true
           sudo make install 2>&1 | tail -5 || true
