@@ -176,18 +176,30 @@ static unsigned char *capture_png(size_t *outLen) {
     void *imf   = dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_LAZY);
     lg("[cap] iokit=%p imf=%p", iokit, imf);
 
-    unsigned (*fb_open)(void) = iokit ? dlsym(iokit, "IOMobileFramebufferOpen") : NULL;
+    unsigned (*fb_open)(void) = imf ? dlsym(imf, "IOMobileFramebufferOpen") : NULL;
     int (*fb_getMain)(unsigned*) = imf ? dlsym(imf, "IOMobileFramebufferGetMainDisplay") : NULL;
     int (*fb_getLayer)(unsigned, int, IOSurfaceRef*) = imf ? dlsym(imf, "IOMobileFramebufferGetLayerDefaultSurface") : NULL;
     lg("[cap] fb_open=%p getMain=%p getLayer=%p", (void*)fb_open, (void*)fb_getMain, (void*)fb_getLayer);
 
     IOSurfaceRef fbSurf = NULL;
-    if (fb_open && fb_getLayer) {
+
+    // 优先用 GetMainDisplay
+    if (fb_getMain) {
+        unsigned fb = 0;
+        int r = fb_getMain(&fb);
+        lg("[cap] getMain rc=%d fb=%u", r, fb);
+        if (fb && fb_getLayer) {
+            int r2 = fb_getLayer(fb, 0, &fbSurf);
+            lg("[cap] getLayer rc=%d surf=%p", r2, (void*)fbSurf);
+        }
+    }
+    // 退化到 Open
+    if (!fbSurf && fb_open && fb_getLayer) {
         unsigned fb = fb_open();
-        lg("[cap] fb handle=%u", fb);
+        lg("[cap] fb_open -> %u", fb);
         if (fb) {
             int r = fb_getLayer(fb, 0, &fbSurf);
-            lg("[cap] getLayer rc=%d surf=%p", r, (void*)fbSurf);
+            lg("[cap] getLayer(open) rc=%d surf=%p", r, (void*)fbSurf);
         }
     }
 
