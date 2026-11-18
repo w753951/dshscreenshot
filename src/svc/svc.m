@@ -21,15 +21,26 @@
 
 static const int  kPort = 47191;
 static const char *kKey = "dsh-go-screen-v1";
-static const char *kLog = "/var/mobile/dsh-screen-plugin.log";
+static const char *kLogDir = "/var/mobile/Library/Logs/dsh";
+static const char *kLog = "/var/mobile/Library/Logs/dsh/svc.log";
 
 /* 抓屏压缩开关：/capture?fmt=jpeg&q=0.4 生效 */
 static int    gJpeg    = 0;
 static double gQuality = 0.4;
 
 static void lg(const char *fmt, ...) {
+    /* 只在第一次进来时建目录（ln -s 风格，路径不存在就 mkdir） */
     FILE *f = fopen(kLog, "a");
     if (!f) return;
+    /* 超过 512KB 滚一份 svc.log.1，避免无限长 */
+    long pos = ftell(f);
+    if (pos > 512 * 1024) {
+        fclose(f);
+        remove("/var/mobile/Library/Logs/dsh/svc.log.1");
+        rename(kLog, "/var/mobile/Library/Logs/dsh/svc.log.1");
+        f = fopen(kLog, "a");
+        if (!f) return;
+    }
     va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
     fputc('\n', f); fclose(f);
 }
@@ -565,7 +576,7 @@ static void *server_thread(void *arg) {
 
 __attribute__((constructor))
 static void svc_init(void) {
-    FILE *f = fopen("/var/mobile/dsh-min.log", "a");
+    FILE *f = fopen("/var/mobile/Library/Logs/dsh/svc-boot.log", "a");
     if (f) { fprintf(f, "svc-ctor uid=%d pid=%d\n", getuid(), getpid()); fclose(f); }
     touch_init();
     dot_load();
